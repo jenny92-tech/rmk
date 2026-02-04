@@ -251,21 +251,33 @@ pub async fn run_rmk<
     #[cfg(feature = "_ble")] stack: &'b Stack<'b, C, DefaultPacketPool>,
     #[cfg(feature = "storage")] storage: &mut Storage<F, ROW, COL, NUM_LAYER, NUM_ENCODER>,
     rmk_config: RmkConfig<'static>,
+    #[cfg(feature = "_custom_tasks")] extra_task: impl Future<Output = ()>,
 ) -> ! {
     // Dispatch the keyboard runner
     #[cfg(feature = "_ble")]
-    crate::ble::run_ble(
-        #[cfg(feature = "host")]
-        keymap,
-        #[cfg(not(feature = "_no_usb"))]
-        usb_driver,
-        #[cfg(feature = "_ble")]
-        stack,
-        #[cfg(feature = "storage")]
-        storage,
-        rmk_config,
-    )
-    .await;
+    {
+        let extra_task_fut = async {
+            #[cfg(feature = "_custom_tasks")]
+            extra_task.await;
+            #[cfg(not(feature = "_custom_tasks"))]
+            core::future::pending::<()>().await;
+        };
+        
+        embassy_futures::join::join(
+            crate::ble::run_ble(
+                #[cfg(feature = "host")]
+                keymap,
+                #[cfg(not(feature = "_no_usb"))]
+                usb_driver,
+                #[cfg(feature = "_ble")]
+                stack,
+                #[cfg(feature = "storage")]
+                storage,
+                rmk_config,
+            ),
+            extra_task_fut,
+        ).await;
+    }
 
     // USB keyboard
     #[cfg(all(not(feature = "_no_usb"), not(feature = "_ble")))]
@@ -289,7 +301,14 @@ pub async fn run_rmk<
         let mut usb_device = usb_builder.build();
 
         // Run all tasks, if one of them fails, wait 1 second and then restart
-        embassy_futures::join::join(logger_fut, async {
+        let extra_task_fut = async {
+            #[cfg(feature = "_custom_tasks")]
+            extra_task.await;
+            #[cfg(not(feature = "_custom_tasks"))]
+            core::future::pending::<()>().await;
+        };
+        
+        embassy_futures::join::join3(logger_fut, async {
             loop {
                 let usb_task = async {
                     loop {
@@ -324,7 +343,7 @@ pub async fn run_rmk<
                 )
                 .await;
             }
-        })
+        }, extra_task_fut)
         .await;
     }
 
