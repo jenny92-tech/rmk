@@ -217,6 +217,9 @@ pico_w_ble = ["_ble", "dep:embassy-rp"]
 ## Enable feature if you want to use trouble BLE stack
 _ble = ["dep:trouble-host", "dep:rand_core", "dep:bt-hci", "storage"]
 
+## Internal feature to enable custom parallel task execution
+_custom_tasks = []
+
 [lib]
 # Don't run doctest for lib
 doctest = false
