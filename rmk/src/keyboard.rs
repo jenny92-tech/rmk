@@ -34,6 +34,8 @@ use crate::morse::{MorsePattern, TAP};
 #[cfg(all(feature = "split", feature = "_ble"))]
 use crate::split::ble::central::update_activity_time;
 use crate::{FORK_MAX_NUM, boot};
+#[cfg(feature = "controller")]
+use crate::{should_intercept_key, should_intercept_encoder};
 
 pub(crate) mod combo;
 pub(crate) mod held_buffer;
@@ -786,6 +788,22 @@ impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_E
             keyboard_event: event,
             key_action,
         });
+
+        // ====== 菜单拦截检查 ======
+        #[cfg(feature = "controller")]
+        {
+            let should_intercept = match event.pos {
+                KeyboardEventPos::Key(KeyPos { row, col }) => should_intercept_key(row, col),
+                KeyboardEventPos::RotaryEncoder(_) => should_intercept_encoder(),
+            };
+            if should_intercept {
+                // 菜单模式下拦截此事件，不发送到主机
+                // 但仍然需要处理 fork 的清理
+                self.try_finish_forks(original_key_action, event);
+                return;
+            }
+        }
+        // ====== 菜单拦截结束 ======
 
         if !key_action.is_morse() {
             match key_action {

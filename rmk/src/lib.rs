@@ -103,6 +103,60 @@ pub mod storage;
 #[cfg(not(feature = "_no_usb"))]
 pub mod usb;
 
+// ============================================================================
+// 菜单拦截功能 (Menu Intercept Feature)
+// ============================================================================
+use core::sync::atomic::AtomicBool;
+
+/// 菜单模式激活标志
+/// 当为 true 时，MENU_INTERCEPT_KEYS 中的按键不会发送到主机
+///
+/// 使用示例：
+/// ```rust
+/// // 进入菜单
+/// rmk::MENU_MODE_ACTIVE.store(true, core::sync::atomic::Ordering::Relaxed);
+/// // 退出菜单
+/// rmk::MENU_MODE_ACTIVE.store(false, core::sync::atomic::Ordering::Relaxed);
+/// ```
+#[cfg(feature = "controller")]
+pub static MENU_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// 菜单模式下需要拦截的按键位置 (row, col)
+/// 最多支持 8 个按键位置
+/// 使用 (0xFF, 0xFF) 表示空位置
+#[cfg(feature = "controller")]
+pub static MENU_INTERCEPT_KEYS: [(u8, u8); 8] = [
+    (0xFF, 0xFF), // 空位置，用户需要在自己的代码中覆盖
+    (0xFF, 0xFF),
+    (0xFF, 0xFF),
+    (0xFF, 0xFF),
+    (0xFF, 0xFF),
+    (0xFF, 0xFF),
+    (0xFF, 0xFF),
+    (0xFF, 0xFF),
+];
+
+/// 菜单模式下是否拦截编码器事件
+#[cfg(feature = "controller")]
+pub static MENU_INTERCEPT_ENCODER: AtomicBool = AtomicBool::new(false);
+
+/// 检查按键是否应该被菜单拦截
+#[cfg(feature = "controller")]
+#[inline]
+pub fn should_intercept_key(row: u8, col: u8) -> bool {
+    if !MENU_MODE_ACTIVE.load(Ordering::Relaxed) {
+        return false;
+    }
+    MENU_INTERCEPT_KEYS.iter().any(|&(r, c)| r == row && c == col)
+}
+
+/// 检查编码器是否应该被菜单拦截
+#[cfg(feature = "controller")]
+#[inline]
+pub fn should_intercept_encoder() -> bool {
+    MENU_MODE_ACTIVE.load(Ordering::Relaxed) && MENU_INTERCEPT_ENCODER.load(Ordering::Relaxed)
+}
+
 pub async fn initialize_keymap<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize>(
     default_keymap: &'a mut [[[KeyAction; COL]; ROW]; NUM_LAYER],
     behavior_config: &'a mut config::BehaviorConfig,
