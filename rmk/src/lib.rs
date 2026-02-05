@@ -104,15 +104,21 @@ pub mod storage;
 pub mod usb;
 
 // ============================================================================
-// 菜单拦截功能 (Menu Intercept Feature)
+// Menu Intercept Feature (菜单拦截功能)
+//
+// 允许在菜单模式下拦截指定按键，不发送到主机
+// Allows intercepting specific keys in menu mode, preventing them from being sent to host
 // ============================================================================
-use core::sync::atomic::AtomicBool;
+use core::sync::atomic::{AtomicBool, AtomicU8};
 
 /// 菜单模式激活标志
 /// 当为 true 时，MENU_INTERCEPT_KEYS 中的按键不会发送到主机
 ///
-/// 使用示例：
-/// ```rust
+/// Menu mode active flag.
+/// When true, keys configured in menu_intercept_set_key() won't be sent to host.
+///
+/// # Example
+/// ```ignore
 /// // 进入菜单
 /// rmk::MENU_MODE_ACTIVE.store(true, core::sync::atomic::Ordering::Relaxed);
 /// // 退出菜单
@@ -121,40 +127,94 @@ use core::sync::atomic::AtomicBool;
 #[cfg(feature = "controller")]
 pub static MENU_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-/// 菜单模式下需要拦截的按键位置 (row, col)
-/// 最多支持 8 个按键位置
-/// 使用 (0xFF, 0xFF) 表示空位置
-#[cfg(feature = "controller")]
-pub static MENU_INTERCEPT_KEYS: [(u8, u8); 8] = [
-    (0xFF, 0xFF), // 空位置，用户需要在自己的代码中覆盖
-    (0xFF, 0xFF),
-    (0xFF, 0xFF),
-    (0xFF, 0xFF),
-    (0xFF, 0xFF),
-    (0xFF, 0xFF),
-    (0xFF, 0xFF),
-    (0xFF, 0xFF),
-];
-
 /// 菜单模式下是否拦截编码器事件
+/// Whether to intercept encoder events in menu mode
 #[cfg(feature = "controller")]
 pub static MENU_INTERCEPT_ENCODER: AtomicBool = AtomicBool::new(false);
 
+/// 菜单拦截按键存储 (最多 8 个按键，每个按键 2 字节: row, col)
+/// 0xFF 表示未配置
+///
+/// Storage for menu intercept keys (max 8 keys, 2 bytes each: row, col)
+/// 0xFF means not configured
+#[cfg(feature = "controller")]
+static MENU_INTERCEPT_KEYS: [AtomicU8; 16] = [
+    AtomicU8::new(0xFF), AtomicU8::new(0xFF),
+    AtomicU8::new(0xFF), AtomicU8::new(0xFF),
+    AtomicU8::new(0xFF), AtomicU8::new(0xFF),
+    AtomicU8::new(0xFF), AtomicU8::new(0xFF),
+    AtomicU8::new(0xFF), AtomicU8::new(0xFF),
+    AtomicU8::new(0xFF), AtomicU8::new(0xFF),
+    AtomicU8::new(0xFF), AtomicU8::new(0xFF),
+    AtomicU8::new(0xFF), AtomicU8::new(0xFF),
+];
+
+/// 配置菜单拦截按键 (运行时调用)
+/// Configure a key to be intercepted in menu mode (call at runtime)
+///
+/// # Arguments
+/// * `index` - 按键槽位 (0-7) / Key slot (0-7)
+/// * `row` - 按键行号 / Key row
+/// * `col` - 按键列号 / Key column
+///
+/// # Example
+/// ```ignore
+/// // 在初始化时配置 / Configure at initialization
+/// rmk::menu_intercept_set_key(0, 0, 3); // SW1 at ROW0/COL3
+/// rmk::menu_intercept_set_key(1, 0, 2); // Confirm key at ROW0/COL2
+/// ```
+#[cfg(feature = "controller")]
+pub fn menu_intercept_set_key(index: usize, row: u8, col: u8) {
+    if index < 8 {
+        MENU_INTERCEPT_KEYS[index * 2].store(row, Ordering::Relaxed);
+        MENU_INTERCEPT_KEYS[index * 2 + 1].store(col, Ordering::Relaxed);
+    }
+}
+
+/// 清除指定位置的拦截配置
+/// Clear intercept configuration at specified index
+#[cfg(feature = "controller")]
+pub fn menu_intercept_clear_key(index: usize) {
+    if index < 8 {
+        MENU_INTERCEPT_KEYS[index * 2].store(0xFF, Ordering::Relaxed);
+        MENU_INTERCEPT_KEYS[index * 2 + 1].store(0xFF, Ordering::Relaxed);
+    }
+}
+
+/// 清除所有拦截配置
+/// Clear all intercept configurations
+#[cfg(feature = "controller")]
+pub fn menu_intercept_clear_all() {
+    for i in 0..16 {
+        MENU_INTERCEPT_KEYS[i].store(0xFF, Ordering::Relaxed);
+    }
+}
+
 /// 检查按键是否应该被菜单拦截
+/// Check if a key should be intercepted by menu
 #[cfg(feature = "controller")]
 #[inline]
 pub fn should_intercept_key(row: u8, col: u8) -> bool {
     if !MENU_MODE_ACTIVE.load(Ordering::Relaxed) {
         return false;
     }
-    MENU_INTERCEPT_KEYS.iter().any(|&(r, c)| r == row && c == col)
+    for i in 0..8 {
+        let r = MENU_INTERCEPT_KEYS[i * 2].load(Ordering::Relaxed);
+        let c = MENU_INTERCEPT_KEYS[i * 2 + 1].load(Ordering::Relaxed);
+        if r == row && c == col {
+            return true;
+        }
+    }
+    false
 }
 
 /// 检查编码器是否应该被菜单拦截
+/// Check if encoder should be intercepted by menu
 #[cfg(feature = "controller")]
 #[inline]
 pub fn should_intercept_encoder() -> bool {
-    MENU_MODE_ACTIVE.load(Ordering::Relaxed) && MENU_INTERCEPT_ENCODER.load(Ordering::Relaxed)
+    MENU_MODE_ACTIVE.load(Ordering::Relaxed)
+        && MENU_INTERCEPT_ENCODER.load(Ordering::Relaxed)
 }
 
 pub async fn initialize_keymap<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize>(
