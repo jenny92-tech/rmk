@@ -101,10 +101,10 @@ pub(crate) fn chip_init_default(keyboard_config: &KeyboardTomlConfig, peripheral
             // Generate display I2C initialization when display feature is enabled
             let display_init = if let Some(display_config) = keyboard_config.get_display_config() {
                 if let Some(i2c_config) = &display_config.i2c {
-                    let sda_pin = format_ident!("{}", i2c_config.sda.to_uppercase());
-                    let scl_pin = format_ident!("{}", i2c_config.scl.to_uppercase());
-                    let reset_pin_name = i2c_config.reset.as_ref().map(|r| format_ident!("{}", r.to_uppercase()));
-                    
+                    let sda_pin = format_ident!("{}", i2c_config.sda.to_uppercase().replace(".", "_"));
+                    let scl_pin = format_ident!("{}", i2c_config.scl.to_uppercase().replace(".", "_"));
+                    let reset_pin_name = i2c_config.reset.as_ref().map(|r| format_ident!("{}", r.to_uppercase().replace(".", "_")));
+
                     let reset_init = if let Some(reset) = &reset_pin_name {
                         quote! {
                             let reset_pin = p.#reset;
@@ -114,18 +114,22 @@ pub(crate) fn chip_init_default(keyboard_config: &KeyboardTomlConfig, peripheral
                             let reset_pin = ();
                         }
                     };
-                    
+
                     quote! {
-                        // Initialize I2C for display (TWIM0)
+                        // Initialize I2C for display (TWIM0) - embassy-nrf 0.8 API
+                        static TWIM_BUF: ::static_cell::StaticCell<[u8; 64]> = ::static_cell::StaticCell::new();
+                        let twim_buf = TWIM_BUF.init([0u8; 64]);
                         let i2c_config = ::embassy_nrf::twim::Config::default();
                         let i2c = ::embassy_nrf::twim::Twim::new(
                             p.TWISPI0,
-                            ::embassy_nrf::interrupt::take!(SPIM0_SPIS0_TWIM0_TWIS0_SPI0_TWI0),
+                            Irqs,  // Use Irqs binding instead of interrupt::take!
                             p.#sda_pin,
                             p.#scl_pin,
                             i2c_config,
+                            twim_buf,  // tx_ram_buffer for DMA
                         );
                         #reset_init
+                        ::defmt::info!("Display I2C initialized");
                     }
                 } else {
                     quote! {
