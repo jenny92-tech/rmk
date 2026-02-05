@@ -58,6 +58,8 @@ pub struct KeyboardTomlConfig {
     input_device: Option<InputDeviceConfig>,
     /// Output Pin config
     output: Option<Vec<OutputConfig>>,
+    /// Display config
+    display: Option<DisplayConfig>,
     /// Set host configurations
     pub host: Option<HostConfig>,
     /// RMK config constants
@@ -1040,6 +1042,35 @@ pub struct OutputConfig {
     pub initial_state_active: bool,
 }
 
+/// Configuration for display (OLED/LCD)
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisplayConfig {
+    /// Enable display
+    #[serde(default)]
+    pub enabled: bool,
+    /// Display width in pixels
+    pub width: Option<u16>,
+    /// Display height in pixels
+    pub height: Option<u16>,
+    /// I2C configuration for display
+    pub i2c: Option<DisplayI2cConfig>,
+}
+
+/// I2C configuration for display
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisplayI2cConfig {
+    /// SDA pin
+    pub sda: String,
+    /// SCL pin
+    pub scl: String,
+    /// Reset pin (optional)
+    pub reset: Option<String>,
+    /// I2C address (e.g., "0x3c")
+    pub address: Option<String>,
+}
+
 impl KeyboardTomlConfig {
     pub fn get_output_config(&self) -> Result<Vec<OutputConfig>, String> {
         let output_config = self.output.clone();
@@ -1050,5 +1081,9 @@ impl KeyboardTomlConfig {
             (None, None) => Ok(Default::default()),
             _ => Err("Use [[split.output]] to define outputs for split in your keyboard.toml!".to_string()),
         }
+    }
+
+    pub fn get_display_config(&self) -> Option<&DisplayConfig> {
+        self.display.as_ref().filter(|d| d.enabled)
     }
 }

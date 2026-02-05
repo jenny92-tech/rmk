@@ -220,6 +220,9 @@ _ble = ["dep:trouble-host", "dep:rand_core", "dep:bt-hci", "storage"]
 ## Internal feature to enable custom parallel task execution
 _custom_tasks = []
 
+## Enable display support (automatically enables _custom_tasks)
+display = ["_custom_tasks"]
+
 [lib]
 # Don't run doctest for lib
 doctest = false
