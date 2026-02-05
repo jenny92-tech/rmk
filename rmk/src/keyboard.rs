@@ -35,7 +35,7 @@ use crate::morse::{MorsePattern, TAP};
 use crate::split::ble::central::update_activity_time;
 use crate::{FORK_MAX_NUM, boot};
 #[cfg(feature = "controller")]
-use crate::{should_intercept_key, should_intercept_encoder};
+use crate::{should_intercept_key, should_intercept_encoder, is_deferred_key};
 
 pub(crate) mod combo;
 pub(crate) mod held_buffer;
@@ -157,6 +157,11 @@ impl<const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_ENCOD
     /// The report is sent using `send_report`.
     async fn run(&mut self) {
         loop {
+            // 处理待发送的按键（来自 send_keycode）
+            // Process pending keycodes (from send_keycode)
+            #[cfg(feature = "controller")]
+            crate::process_pending_keycodes();
+
             // TODO: Now the unprocessed_events is only used in one-shot keys and clear peer key.
             // Maybe it can be removed in the future?
             if !self.unprocessed_events.is_empty() {
@@ -788,6 +793,20 @@ impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_E
             keyboard_event: event,
             key_action,
         });
+
+        // ====== 延迟按键检查 ======
+        // 延迟按键始终被拦截，但 KeyEvent 已发布给控制器
+        #[cfg(feature = "controller")]
+        {
+            if let KeyboardEventPos::Key(KeyPos { row, col }) = event.pos {
+                if is_deferred_key(row, col) {
+                    // 延迟按键：控制器会决定是否发送
+                    self.try_finish_forks(original_key_action, event);
+                    return;
+                }
+            }
+        }
+        // ====== 延迟按键检查结束 ======
 
         // ====== 菜单拦截检查 ======
         #[cfg(feature = "controller")]

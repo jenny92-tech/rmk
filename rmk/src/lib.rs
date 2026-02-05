@@ -217,6 +217,129 @@ pub fn should_intercept_encoder() -> bool {
         && MENU_INTERCEPT_ENCODER.load(Ordering::Relaxed)
 }
 
+// ============================================================================
+// 延迟按键功能 (Deferred Key Feature)
+//
+// 延迟按键会被拦截（不发送到主机），但 KeyEvent 正常发布给控制器
+// 控制器判断后可调用 send_keycode() 手动发送
+// ============================================================================
+
+/// 延迟按键存储（最多 8 个，每个 2 字节: row, col）
+///
+/// Storage for deferred keys (max 8 keys, 2 bytes each: row, col)
+/// 0xFF means not configured
+#[cfg(feature = "controller")]
+static DEFERRED_KEYS: [AtomicU8; 16] = [
+    AtomicU8::new(0xFF), AtomicU8::new(0xFF),
+    AtomicU8::new(0xFF), AtomicU8::new(0xFF),
+    AtomicU8::new(0xFF), AtomicU8::new(0xFF),
+    AtomicU8::new(0xFF), AtomicU8::new(0xFF),
+    AtomicU8::new(0xFF), AtomicU8::new(0xFF),
+    AtomicU8::new(0xFF), AtomicU8::new(0xFF),
+    AtomicU8::new(0xFF), AtomicU8::new(0xFF),
+    AtomicU8::new(0xFF), AtomicU8::new(0xFF),
+];
+
+/// 配置延迟按键
+///
+/// 延迟按键会被拦截但 KeyEvent 仍发布给控制器，
+/// 控制器可调用 send_keycode() 决定是否发送
+///
+/// # Example
+/// ```ignore
+/// // SW1 设为延迟按键，用于长按/短按检测
+/// rmk::deferred_key_set(0, 0, 3);
+/// ```
+#[cfg(feature = "controller")]
+pub fn deferred_key_set(index: usize, row: u8, col: u8) {
+    if index < 8 {
+        DEFERRED_KEYS[index * 2].store(row, Ordering::Relaxed);
+        DEFERRED_KEYS[index * 2 + 1].store(col, Ordering::Relaxed);
+    }
+}
+
+/// 清除延迟按键配置
+/// Clear deferred key configuration
+#[cfg(feature = "controller")]
+pub fn deferred_key_clear(index: usize) {
+    if index < 8 {
+        DEFERRED_KEYS[index * 2].store(0xFF, Ordering::Relaxed);
+        DEFERRED_KEYS[index * 2 + 1].store(0xFF, Ordering::Relaxed);
+    }
+}
+
+/// 检查是否是延迟按键
+/// Check if a key is a deferred key
+#[cfg(feature = "controller")]
+#[inline]
+pub fn is_deferred_key(row: u8, col: u8) -> bool {
+    for i in 0..8 {
+        let r = DEFERRED_KEYS[i * 2].load(Ordering::Relaxed);
+        let c = DEFERRED_KEYS[i * 2 + 1].load(Ordering::Relaxed);
+        if r == row && c == col {
+            return true;
+        }
+    }
+    false
+}
+
+// ============================================================================
+// 手动发送按键功能 (Manual Key Send)
+// ============================================================================
+
+use channel::KEYBOARD_REPORT_CHANNEL;
+use hid::Report;
+use descriptor::KeyboardReport;
+use rmk_types::keycode::KeyCode;
+
+/// 待发送的按键队列
+/// Channel for pending keycodes to be sent
+#[cfg(feature = "controller")]
+static PENDING_KEYCODES: embassy_sync::channel::Channel<RawMutex, (KeyCode, bool), 8> = embassy_sync::channel::Channel::new();
+
+/// 手动发送按键
+///
+/// 控制器调用此函数发送按键到主机
+///
+/// # Arguments
+/// * `keycode` - 要发送的键码 / Keycode to send
+/// * `pressed` - true=按下, false=释放 / true=press, false=release
+///
+/// # Example
+/// ```ignore
+/// // 发送 ESC 按下和释放
+/// rmk::send_keycode(KeyCode::Escape, true);
+/// rmk::send_keycode(KeyCode::Escape, false);
+/// ```
+#[cfg(feature = "controller")]
+pub fn send_keycode(keycode: KeyCode, pressed: bool) {
+    let _ = PENDING_KEYCODES.try_send((keycode, pressed));
+}
+
+/// 处理待发送的按键（在键盘主循环中调用）
+/// Process pending keycodes (called in keyboard main loop)
+///
+/// 返回是否有按键被处理 / Returns whether any key was processed
+#[cfg(feature = "controller")]
+pub(crate) fn process_pending_keycodes() -> bool {
+    use crate::hid::HidWriterTrait;
+    let mut processed = false;
+    while let Ok((keycode, pressed)) = PENDING_KEYCODES.try_receive() {
+        // 构建并发送 HID 报告
+        let mut report = KeyboardReport::default();
+        if pressed {
+            // 按下：添加键码
+            if let Some(hid_code) = keycode.as_hid_keycode() {
+                report.keycodes[0] = hid_code;
+            }
+        }
+        // 发送到报告通道
+        let _ = KEYBOARD_REPORT_CHANNEL.try_send(Report::Keyboard(report));
+        processed = true;
+    }
+    processed
+}
+
 pub async fn initialize_keymap<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize>(
     default_keymap: &'a mut [[[KeyAction; COL]; ROW]; NUM_LAYER],
     behavior_config: &'a mut config::BehaviorConfig,
