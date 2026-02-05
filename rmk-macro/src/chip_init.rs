@@ -1,6 +1,6 @@
 use darling::FromMeta;
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{ToTokens, quote};
+use quote::{ToTokens, format_ident, quote};
 use rmk_config::{BoardConfig, ChipModel, ChipSeries, CommunicationConfig, KeyboardTomlConfig};
 use syn::{ItemFn, ItemMod};
 
@@ -97,6 +97,48 @@ pub(crate) fn chip_init_default(keyboard_config: &KeyboardTomlConfig, peripheral
                 // For peripheral
                 6144
             };
+
+            // Generate display I2C initialization when display feature is enabled
+            let display_init = if let Some(display_config) = keyboard_config.get_display_config() {
+                if let Some(i2c_config) = &display_config.i2c {
+                    let sda_pin = format_ident!("{}", i2c_config.sda.to_uppercase());
+                    let scl_pin = format_ident!("{}", i2c_config.scl.to_uppercase());
+                    let reset_pin_name = i2c_config.reset.as_ref().map(|r| format_ident!("{}", r.to_uppercase()));
+                    
+                    let reset_init = if let Some(reset) = &reset_pin_name {
+                        quote! {
+                            let reset_pin = p.#reset;
+                        }
+                    } else {
+                        quote! {
+                            let reset_pin = ();
+                        }
+                    };
+                    
+                    quote! {
+                        // Initialize I2C for display (TWIM0)
+                        let i2c_config = ::embassy_nrf::twim::Config::default();
+                        let i2c = ::embassy_nrf::twim::Twim::new(
+                            p.TWISPI0,
+                            ::embassy_nrf::interrupt::take!(SPIM0_SPIS0_TWIM0_TWIS0_SPI0_TWI0),
+                            p.#sda_pin,
+                            p.#scl_pin,
+                            i2c_config,
+                        );
+                        #reset_init
+                    }
+                } else {
+                    quote! {
+                        let i2c = ();
+                        let reset_pin = ();
+                    }
+                }
+            } else {
+                quote! {
+                    let i2c = ();
+                    let reset_pin = ();
+                }
+            };
             let ble_init = match &communication {
                 CommunicationConfig::Ble(_) | CommunicationConfig::Both(_, _) => quote! {
                     // Initialize nrf-sdc and ble stack
@@ -138,6 +180,7 @@ pub(crate) fn chip_init_default(keyboard_config: &KeyboardTomlConfig, peripheral
                 #dcdc_config
                 let p = ::embassy_nrf::init(config);
                 #ble_init
+                #display_init
             }
         }
         ChipSeries::Rp2040 => {
