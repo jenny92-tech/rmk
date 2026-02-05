@@ -329,8 +329,8 @@ pub(crate) fn process_pending_keycodes() -> bool {
         let mut report = KeyboardReport::default();
         if pressed {
             // 按下：添加键码
-            if let Some(hid_code) = keycode.to_hid_keycode() {
-                report.keycodes[0] = hid_code;
+            if let KeyCode::Hid(hid_code) = keycode {
+                report.keycodes[0] = hid_code as u8;
             }
         }
         // 发送到报告通道
