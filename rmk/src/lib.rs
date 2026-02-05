@@ -329,12 +329,12 @@ pub(crate) fn process_pending_keycodes() -> bool {
         let mut report = KeyboardReport::default();
         if pressed {
             // 按下：添加键码
-            if let Some(hid_code) = keycode.as_hid_keycode() {
+            if let Some(hid_code) = keycode.to_hid_keycode() {
                 report.keycodes[0] = hid_code;
             }
         }
         // 发送到报告通道
-        let _ = KEYBOARD_REPORT_CHANNEL.try_send(Report::Keyboard(report));
+        let _ = KEYBOARD_REPORT_CHANNEL.try_send(Report::KeyboardReport(report));
         processed = true;
     }
     processed
