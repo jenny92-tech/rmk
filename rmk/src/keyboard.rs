@@ -155,6 +155,14 @@ impl<const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_ENCOD
     /// The report is sent using `send_report`.
     async fn run(&mut self) -> ! {
         loop {
+            // Process pending keycodes from send_keycode()
+            crate::process_pending_keycodes();
+
+            // Process pending default layer changes from set_default_layer()
+            while let Ok(layer) = crate::PENDING_DEFAULT_LAYER.try_receive() {
+                self.keymap.borrow_mut().set_default_layer(layer);
+            }
+
             // TODO: Now the unprocessed_events is only used in one-shot keys and clear peer key.
             // Maybe it can be removed in the future?
             if !self.unprocessed_events.is_empty() {
@@ -791,6 +799,32 @@ impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_E
 
         #[cfg(feature = "_ble")]
         LAST_KEY_TIMESTAMP.signal(Instant::now().as_secs() as u32);
+
+        // Publish KeyEvent for external subscribers (menu controller, etc.)
+        crate::publish_key_event(crate::KeyEvent {
+            keyboard_event: event,
+            key_action,
+        });
+
+        // Deferred key check: intercepted but KeyEvent already published above
+        if let KeyboardEventPos::Key(KeyPos { row, col }) = event.pos {
+            if crate::is_deferred_key(row, col) {
+                self.try_finish_forks(original_key_action, event);
+                return;
+            }
+        }
+
+        // Menu interception check
+        {
+            let should_intercept = match event.pos {
+                KeyboardEventPos::Key(KeyPos { row, col }) => crate::should_intercept_key(row, col),
+                KeyboardEventPos::RotaryEncoder(_) => crate::should_intercept_encoder(),
+            };
+            if should_intercept {
+                self.try_finish_forks(original_key_action, event);
+                return;
+            }
+        }
 
         if !key_action.is_morse() {
             match key_action {

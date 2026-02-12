@@ -102,6 +102,183 @@ pub mod storage;
 #[cfg(not(feature = "_no_usb"))]
 pub mod usb;
 
+// ============================================================================
+// K9-Pad Runtime API
+// ============================================================================
+
+use core::sync::atomic::{AtomicBool, AtomicU8};
+use crate::event::KeyboardEvent;
+
+// --- KeyEvent: wraps KeyboardEvent + resolved KeyAction ---
+
+/// Key event with resolved action, published for every key press/release
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct KeyEvent {
+    pub keyboard_event: KeyboardEvent,
+    pub key_action: KeyAction,
+}
+
+static KEY_EVENT_CHANNEL: embassy_sync::pubsub::PubSubChannel<RawMutex, KeyEvent, 4, 2, 1> =
+    embassy_sync::pubsub::PubSubChannel::new();
+
+pub(crate) fn publish_key_event(event: KeyEvent) {
+    KEY_EVENT_CHANNEL.immediate_publisher().publish_immediate(event);
+}
+
+/// Subscribe to key events (keyboard event + resolved action)
+pub fn key_event_subscriber() -> embassy_sync::pubsub::Subscriber<'static, RawMutex, KeyEvent, 4, 2, 1> {
+    KEY_EVENT_CHANNEL.subscriber().unwrap()
+}
+
+// --- Menu interception ---
+
+/// When true, configured keys are intercepted (not sent to host)
+pub static MENU_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Whether to intercept encoder events in menu mode
+pub static MENU_INTERCEPT_ENCODER: AtomicBool = AtomicBool::new(false);
+
+/// Menu intercept key storage (max 8 keys, 2 bytes each: row, col). 0xFF = not configured.
+static MENU_INTERCEPT_KEYS: [AtomicU8; 16] = {
+    const INIT: AtomicU8 = AtomicU8::new(0xFF);
+    [INIT; 16]
+};
+
+/// Configure a key to be intercepted in menu mode
+pub fn menu_intercept_set_key(index: usize, row: u8, col: u8) {
+    if index < 8 {
+        MENU_INTERCEPT_KEYS[index * 2].store(row, Ordering::Relaxed);
+        MENU_INTERCEPT_KEYS[index * 2 + 1].store(col, Ordering::Relaxed);
+    }
+}
+
+/// Clear a menu intercept key slot
+pub fn menu_intercept_clear_key(index: usize) {
+    if index < 8 {
+        MENU_INTERCEPT_KEYS[index * 2].store(0xFF, Ordering::Relaxed);
+        MENU_INTERCEPT_KEYS[index * 2 + 1].store(0xFF, Ordering::Relaxed);
+    }
+}
+
+/// Clear all menu intercept keys
+pub fn menu_intercept_clear_all() {
+    for i in 0..16 {
+        MENU_INTERCEPT_KEYS[i].store(0xFF, Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn should_intercept_key(row: u8, col: u8) -> bool {
+    if !MENU_MODE_ACTIVE.load(Ordering::Relaxed) {
+        return false;
+    }
+    for i in 0..8 {
+        let r = MENU_INTERCEPT_KEYS[i * 2].load(Ordering::Relaxed);
+        let c = MENU_INTERCEPT_KEYS[i * 2 + 1].load(Ordering::Relaxed);
+        if r == 0xFF { continue; }
+        if r == row && c == col { return true; }
+    }
+    false
+}
+
+pub(crate) fn should_intercept_encoder() -> bool {
+    MENU_MODE_ACTIVE.load(Ordering::Relaxed) && MENU_INTERCEPT_ENCODER.load(Ordering::Relaxed)
+}
+
+// --- Deferred keys ---
+
+/// Deferred key storage (max 8 keys). Deferred keys are intercepted but KeyEvent is still published.
+static DEFERRED_KEYS: [AtomicU8; 16] = {
+    const INIT: AtomicU8 = AtomicU8::new(0xFF);
+    [INIT; 16]
+};
+
+pub fn deferred_key_set(index: usize, row: u8, col: u8) {
+    if index < 8 {
+        DEFERRED_KEYS[index * 2].store(row, Ordering::Relaxed);
+        DEFERRED_KEYS[index * 2 + 1].store(col, Ordering::Relaxed);
+    }
+}
+
+pub fn deferred_key_clear(index: usize) {
+    if index < 8 {
+        DEFERRED_KEYS[index * 2].store(0xFF, Ordering::Relaxed);
+        DEFERRED_KEYS[index * 2 + 1].store(0xFF, Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn is_deferred_key(row: u8, col: u8) -> bool {
+    for i in 0..8 {
+        let r = DEFERRED_KEYS[i * 2].load(Ordering::Relaxed);
+        let c = DEFERRED_KEYS[i * 2 + 1].load(Ordering::Relaxed);
+        if r == 0xFF { continue; }
+        if r == row && c == col { return true; }
+    }
+    false
+}
+
+// --- send_keycode ---
+
+use rmk_types::keycode::KeyCode;
+
+static PENDING_KEYCODES: embassy_sync::channel::Channel<RawMutex, (KeyCode, bool), 8> =
+    embassy_sync::channel::Channel::new();
+
+/// Manually send a keycode (press or release) from external code
+pub fn send_keycode(keycode: KeyCode, pressed: bool) {
+    let _ = PENDING_KEYCODES.try_send((keycode, pressed));
+}
+
+/// Process pending keycodes into HID reports (called from keyboard main loop)
+pub(crate) fn process_pending_keycodes() -> bool {
+    let mut processed = false;
+    while let Ok((keycode, pressed)) = PENDING_KEYCODES.try_receive() {
+        let mut report = crate::descriptor::KeyboardReport::default();
+        match keycode {
+            KeyCode::Hid(hid_code) => {
+                if pressed {
+                    report.keycodes[0] = hid_code as u8;
+                }
+            }
+            _ => continue,
+        }
+        let _ = crate::channel::KEYBOARD_REPORT_CHANNEL.try_send(crate::hid::Report::KeyboardReport(report));
+        processed = true;
+    }
+    processed
+}
+
+// --- set_default_layer ---
+
+static PENDING_DEFAULT_LAYER: embassy_sync::channel::Channel<RawMutex, u8, 4> =
+    embassy_sync::channel::Channel::new();
+
+/// Switch the default keymap layer at runtime
+pub fn set_default_layer(layer: u8) {
+    let _ = PENDING_DEFAULT_LAYER.try_send(layer);
+}
+
+// --- BLE profile API ---
+
+#[cfg(feature = "_ble")]
+use crate::channel::BLE_PROFILE_CHANNEL;
+#[cfg(feature = "_ble")]
+use crate::ble::profile::BleProfileAction;
+
+/// Switch to a specific BLE profile (0-7)
+#[cfg(feature = "_ble")]
+pub fn switch_ble_profile(profile: u8) {
+    let _ = BLE_PROFILE_CHANNEL.try_send(BleProfileAction::SwitchProfile(profile));
+}
+
+/// Clear bonding info for the current BLE profile
+#[cfg(feature = "_ble")]
+pub fn clear_ble_bond() {
+    let _ = BLE_PROFILE_CHANNEL.try_send(BleProfileAction::ClearProfile);
+}
+
+// ============================================================================
+
 pub async fn initialize_keymap<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize>(
     default_keymap: &'a mut [[[KeyAction; COL]; ROW]; NUM_LAYER],
     behavior_config: &'a mut config::BehaviorConfig,
