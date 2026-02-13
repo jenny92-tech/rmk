@@ -49,6 +49,8 @@ use crate::usb::add_usb_logger;
 use crate::{CONNECTION_STATE, run_keyboard};
 pub(crate) mod battery_service;
 pub(crate) mod ble_server;
+#[cfg(feature = "data_channel")]
+pub(crate) mod data_channel_service;
 pub(crate) mod device_info;
 #[cfg(feature = "host")]
 pub(crate) mod host_service;
@@ -486,6 +488,10 @@ async fn gatt_events_task(server: &Server<'_>, conn: &GattConnection<'_, '_, Def
     let media = server.composite_service.media_report;
     let media_control_point = server.composite_service.hid_control_point;
     let system_control = server.composite_service.system_report;
+    #[cfg(feature = "data_channel")]
+    let data_channel_rx = server.data_channel_service.rx_from_host;
+    #[cfg(feature = "data_channel")]
+    let data_channel_tx = server.data_channel_service.tx_to_host;
 
     CONNECTION_STATE.store(ConnectionState::Connected.into(), Ordering::Release);
 
@@ -568,6 +574,16 @@ async fn gatt_events_task(server: &Server<'_>, conn: &GattConnection<'_, '_, Def
                                 }
                             }
                         } else {
+                            #[cfg(feature = "data_channel")]
+                            if event.handle() == data_channel_rx.handle {
+                                let mut data = [0u8; 64];
+                                let len = event.data().len().min(64);
+                                data[..len].copy_from_slice(&event.data()[..len]);
+                                let _ = crate::ble::data_channel_service::DATA_CHANNEL_RX.try_send(data);
+                            } else if event.handle() == data_channel_tx.cccd_handle.expect("No CCCD for data channel TX") {
+                                cccd_updated = true;
+                            }
+
                             #[cfg(feature = "host")]
                             if event.handle() == output_host.handle {
                                 debug!("Got host packet: {:?}", event.data());
@@ -846,6 +862,8 @@ async fn run_ble_keyboard<
     let ble_hid_server = BleHidServer::new(server, conn);
     #[cfg(feature = "host")]
     let ble_host_server = BleHostServer::new(server, conn);
+    #[cfg(feature = "data_channel")]
+    let ble_data_channel_server = crate::ble::data_channel_service::BleDataChannelServer::new(server, conn);
     let ble_led_reader = BleLedReader {};
     let mut ble_battery_server = BleBatteryServer::new(server, conn);
 
@@ -864,15 +882,23 @@ async fn run_ble_keyboard<
     update_ble_phy(stack, conn.raw()).await;
 
     let communication_task = async {
-        if let Either3::First(e) = select3(
-            gatt_events_task(server, conn),
-            set_conn_params(stack, conn),
-            ble_battery_server.run(),
-        )
-        .await
-        {
-            error!("[gatt_events_task] end: {:?}", e)
-        }
+        let core_task = async {
+            if let Either3::First(e) = select3(
+                gatt_events_task(server, conn),
+                set_conn_params(stack, conn),
+                ble_battery_server.run(),
+            )
+            .await
+            {
+                error!("[gatt_events_task] end: {:?}", e)
+            }
+        };
+
+        #[cfg(feature = "data_channel")]
+        select(core_task, ble_data_channel_server.run()).await;
+
+        #[cfg(not(feature = "data_channel"))]
+        core_task.await;
     };
 
     run_keyboard(

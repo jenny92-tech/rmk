@@ -4,6 +4,8 @@ use usbd_hid::descriptor::SerializedDescriptor;
 
 use super::battery_service::BatteryService;
 use super::device_info::DeviceConfigurationService;
+#[cfg(feature = "data_channel")]
+use super::data_channel_service::DataChannelService;
 #[cfg(feature = "host")]
 use super::host_service::HostService;
 use crate::channel::KEYBOARD_REPORT_CHANNEL;
@@ -19,7 +21,18 @@ pub(crate) const CCCD_TABLE_SIZE: usize = _CCCD_TABLE_SIZE;
 // the flag was on, for some reason. I suspect it might have something to do with
 // the `gatt_server` macro, but I'm not sure. So we need 2 versions of the Server
 // struct, one with vial support, and one without.
-#[cfg(feature = "host")]
+#[cfg(all(feature = "host", feature = "data_channel"))]
+#[gatt_server]
+pub(crate) struct Server {
+    pub(crate) battery_service: BatteryService,
+    pub(crate) hid_service: HidService,
+    pub(crate) host_service: HostService,
+    pub(crate) composite_service: CompositeService,
+    pub(crate) device_config_service: DeviceConfigurationService,
+    pub(crate) data_channel_service: DataChannelService,
+}
+
+#[cfg(all(feature = "host", not(feature = "data_channel")))]
 #[gatt_server]
 pub(crate) struct Server {
     pub(crate) battery_service: BatteryService,
@@ -29,7 +42,17 @@ pub(crate) struct Server {
     pub(crate) device_config_service: DeviceConfigurationService,
 }
 
-#[cfg(not(feature = "host"))]
+#[cfg(all(not(feature = "host"), feature = "data_channel"))]
+#[gatt_server]
+pub(crate) struct Server {
+    pub(crate) battery_service: BatteryService,
+    pub(crate) hid_service: HidService,
+    pub(crate) composite_service: CompositeService,
+    pub(crate) device_config_service: DeviceConfigurationService,
+    pub(crate) data_channel_service: DataChannelService,
+}
+
+#[cfg(all(not(feature = "host"), not(feature = "data_channel")))]
 #[gatt_server]
 pub(crate) struct Server {
     pub(crate) battery_service: BatteryService,

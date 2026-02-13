@@ -116,6 +116,9 @@ default = ["defmt", "storage", "vial", "vial_lock"]
 ## Enable host configurator support
 host = []
 
+## Enable BLE data channel support for custom data transfer
+data_channel = []
+
 ## Enable vial support
 vial = ["host"]
 
