@@ -122,6 +122,12 @@ vial = ["host"]
 ## Enable vial lock feature
 vial_lock = ["vial"]
 
+## Enable controller mode (menu intercept, deferred keys, key events)
+controller = []
+
+## Enable BLE data channel for custom host-device communication
+data_channel = []
+
 ## Enable the storage. The storage is optional to save memory
 storage = ["dep:embedded-storage", "dep:embedded-storage-async"]
 
@@ -212,6 +218,12 @@ pico_w_ble = ["_ble", "dep:embassy-rp"]
 
 ## Enable feature if you want to use trouble BLE stack
 _ble = ["dep:trouble-host", "dep:rand_core", "dep:bt-hci", "storage"]
+
+## Internal feature to enable custom parallel task execution
+_custom_tasks = []
+
+## Enable display support (automatically enables _custom_tasks)
+display = ["_custom_tasks"]
 
 [lib]
 # Don't run doctest for lib

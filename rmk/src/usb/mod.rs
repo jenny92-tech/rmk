@@ -127,7 +127,7 @@ pub(crate) fn new_usb_builder<'d, D: Driver<'d>>(driver: D, keyboard_config: Dev
     #[cfg(feature = "usb_log")]
     const USB_BUF_SIZE: usize = 256;
     #[cfg(not(feature = "usb_log"))]
-    const USB_BUF_SIZE: usize = 128;
+    const USB_BUF_SIZE: usize = 192;
 
     // Create embassy-usb DeviceBuilder using the driver and config.
     static CONFIG_DESC: StaticCell<[u8; USB_BUF_SIZE]> = StaticCell::new();

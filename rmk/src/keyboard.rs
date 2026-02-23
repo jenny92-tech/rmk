@@ -14,6 +14,8 @@ use rmk_types::modifier::ModifierCombination;
 use rmk_types::mouse_button::MouseButtons;
 use usbd_hid::descriptor::{MediaKeyboardReport, MouseReport, SystemControlReport};
 
+#[cfg(feature = "controller")]
+use crate::{DeferredEventState, KeyEvent, publish_controller_event};
 use crate::channel::KEYBOARD_REPORT_CHANNEL;
 use crate::combo::Combo;
 use crate::config::Hand;
@@ -34,6 +36,8 @@ use crate::morse::{MorsePattern, TAP};
 #[cfg(all(feature = "split", feature = "_ble"))]
 use crate::split::ble::central::update_activity_time;
 use crate::{FORK_MAX_NUM, boot};
+#[cfg(feature = "controller")]
+use crate::{should_intercept_key, should_intercept_encoder, is_deferred_key, deferred_key_hold_threshold};
 
 pub(crate) mod combo;
 pub(crate) mod held_buffer;
@@ -155,6 +159,16 @@ impl<const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_ENCOD
     /// The report is sent using `send_report`.
     async fn run(&mut self) -> ! {
         loop {
+            // 处理待发送的按键（来自 send_keycode）
+            // Process pending keycodes (from send_keycode)
+            #[cfg(feature = "controller")]
+            crate::process_pending_keycodes();
+
+            // 处理运行时切层请求（来自 set_default_layer）
+            while let Ok(layer) = crate::PENDING_DEFAULT_LAYER.try_receive() {
+                self.keymap.borrow_mut().set_default_layer(layer);
+            }
+
             // TODO: Now the unprocessed_events is only used in one-shot keys and clear peer key.
             // Maybe it can be removed in the future?
             if !self.unprocessed_events.is_empty() {
@@ -307,8 +321,10 @@ impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_E
     /// or a morse key that is in the pressed or released state.
     pub fn next_buffered_key(&mut self) -> Option<HeldKey> {
         self.held_buffer.next_timeout(|k| {
-            matches!(k.state, KeyState::Released(_) | KeyState::WaitingCombo)
-                || (matches!(k.state, KeyState::Pressed(_)) && k.action.is_morse())
+            matches!(
+                k.state,
+                KeyState::Released(_) | KeyState::WaitingCombo | KeyState::DeferredPressed
+            ) || (matches!(k.state, KeyState::Pressed(_)) && k.action.is_morse())
         })
     }
 
@@ -368,6 +384,27 @@ impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_E
                         Err(_timeout) => {
                             debug!("Buffered morse key timeout");
                             self.handle_morse_timeout(&key).await;
+                        }
+                    }
+                }
+            }
+            KeyState::DeferredPressed => {
+                #[cfg(feature = "controller")]
+                {
+                    debug!("Waiting deferred key hold timeout: {:?}", key.event);
+                    match with_deadline(key.timeout_time, self.keyboard_event_subscriber.next_message_pure()).await {
+                        Ok(event) => {
+                            // 新事件到达（可能是 release），正常处理
+                            self.process_inner(event).await;
+                        }
+                        Err(_timeout) => {
+                            // Hold 超时：从 buffer 移除，通知 controller HoldActivated
+                            self.held_buffer.remove(key.event.pos);
+                            publish_controller_event(KeyEvent {
+                                keyboard_event: key.event,
+                                key_action: key.action,
+                                deferred_state: DeferredEventState::HoldActivated,
+                            });
                         }
                     }
                 }
@@ -792,6 +829,95 @@ impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_E
         #[cfg(feature = "_ble")]
         LAST_KEY_TIMESTAMP.signal(Instant::now().as_secs() as u32);
 
+        // ====== 延迟按键检查 ======
+        #[cfg(feature = "controller")]
+        {
+            if let KeyboardEventPos::Key(KeyPos { row, col }) = event.pos {
+                if is_deferred_key(row, col) {
+                    let threshold = deferred_key_hold_threshold(row, col);
+                    if threshold > 0 {
+                        // ---- hold-tap 模式 ----
+                        // 通知 controller（Normal 状态，tap/hold 决策待定）
+                        publish_controller_event(KeyEvent {
+                            keyboard_event: event,
+                            key_action,
+                            deferred_state: DeferredEventState::Normal,
+                        });
+
+                        if event.pressed {
+                            // 按下：存入 held buffer，等待超时或释放
+                            let now = Instant::now();
+                            let timeout = now + Duration::from_millis(threshold as u64);
+                            self.held_buffer.push(HeldKey::new(
+                                event,
+                                key_action,
+                                KeyState::DeferredPressed,
+                                now,
+                                timeout,
+                            ));
+                        } else {
+                            // 释放：检查 held buffer 中是否还有 DeferredPressed
+                            if let Some(_held) = self.held_buffer.remove_if(|k| {
+                                k.event.pos == event.pos
+                                    && matches!(k.state, KeyState::DeferredPressed)
+                            }) {
+                                // 在阈值内释放 → tap
+                                if should_intercept_key(row, col) {
+                                    // 菜单模式拦截：不发 tap，controller 处理
+                                } else {
+                                    // 正常 tap：走 HID 管线
+                                    let press_event = KeyboardEvent {
+                                        pressed: true,
+                                        pos: event.pos,
+                                    };
+                                    self.process_key_action_tap(
+                                        key_action.to_action(),
+                                        press_event,
+                                    ).await;
+                                }
+                            }
+                            // 如果 held buffer 中没找到（已超时移除） → hold 已处理，什么都不做
+                        }
+
+                        self.try_finish_forks(original_key_action, event);
+                        return;
+                    } else {
+                        // ---- 旧行为（threshold == 0）：完全延迟 ----
+                        publish_controller_event(KeyEvent {
+                            keyboard_event: event,
+                            key_action,
+                            deferred_state: DeferredEventState::Normal,
+                        });
+                        self.try_finish_forks(original_key_action, event);
+                        return;
+                    }
+                }
+            }
+        }
+        // ====== 延迟按键检查结束 ======
+
+        #[cfg(feature = "controller")]
+        publish_controller_event(KeyEvent {
+            keyboard_event: event,
+            key_action,
+            deferred_state: DeferredEventState::Normal,
+        });
+
+        // ====== 菜单拦截检查 ======
+        #[cfg(feature = "controller")]
+        {
+            let should_intercept = match event.pos {
+                KeyboardEventPos::Key(KeyPos { row, col }) => should_intercept_key(row, col),
+                KeyboardEventPos::RotaryEncoder(_) => should_intercept_encoder(),
+            };
+            if should_intercept {
+                // 菜单模式下拦截此事件，不发送到主机
+                // 但仍然需要处理 fork 的清理
+                self.try_finish_forks(original_key_action, event);
+                return;
+            }
+        }
+        // ====== 菜单拦截结束 ======
         if !key_action.is_morse() {
             match key_action {
                 KeyAction::No | KeyAction::Transparent => (),

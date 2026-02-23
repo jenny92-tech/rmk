@@ -110,6 +110,10 @@ pub enum KeyState {
     /// but the release HID report is not sent yet (will be sent only when the corresponding
     /// key is really released).
     ProcessedButReleaseNotReportedYet(Action),
+
+    /// Deferred hold-tap key waiting for tap/hold decision.
+    /// On timeout → hold (notify controller), on release before timeout → tap (normal HID).
+    DeferredPressed,
     // The Idle state is represented by the removal from the HeldBuffer
 }
 

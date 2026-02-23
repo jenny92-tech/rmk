@@ -123,9 +123,10 @@ pub(crate) fn chip_init_default(
 
                     quote! {
                         // Initialize I2C for display (TWIM0) - embassy-nrf 0.8 API
-                        static TWIM_BUF: ::static_cell::StaticCell<[u8; 64]> = ::static_cell::StaticCell::new();
-                        let twim_buf = TWIM_BUF.init([0u8; 64]);
-                        let i2c_config = ::embassy_nrf::twim::Config::default();
+                        static TWIM_BUF: ::static_cell::StaticCell<[u8; 256]> = ::static_cell::StaticCell::new();
+                        let twim_buf = TWIM_BUF.init([0u8; 256]);
+                        let mut i2c_config = ::embassy_nrf::twim::Config::default();
+                        i2c_config.frequency = ::embassy_nrf::twim::Frequency::K400;
                         let i2c = ::embassy_nrf::twim::Twim::new(
                             p.TWISPI0,
                             Irqs,  // Use Irqs binding instead of interrupt::take!
