@@ -95,9 +95,21 @@ pub(crate) fn rmk_entry_select(
             };
             let mut tasks = vec![devices_task, keyboard_task];
             tasks.extend(registered_processors);
+
+            // Generate extra_task for custom parallel execution (e.g., display)
+            let extra_task = quote! {
+                {
+                    #[cfg(feature = "display")]
+                    {
+                        crate::run_display(i2c, reset_pin).await
+                    }
+                    #[cfg(not(feature = "display"))]
+                    core::future::pending::<()>().await
+                }
+            };
             if split_config.connection == "ble" {
                 let rmk_task = quote! {
-                    ::rmk::run_rmk(#keymap #usb_driver_arg &stack, #storage rmk_config)
+                    ::rmk::run_rmk(#keymap #usb_driver_arg &stack, #storage rmk_config, async { #extra_task })
                 };
                 tasks.push(rmk_task);
                 if !processors.is_empty() {
@@ -123,7 +135,7 @@ pub(crate) fn rmk_entry_select(
                 join_all_tasks(tasks)
             } else if split_config.connection == "serial" {
                 let rmk_task = quote! {
-                    ::rmk::run_rmk(#keymap #usb_driver_arg #storage rmk_config),
+                    ::rmk::run_rmk(#keymap #usb_driver_arg #storage rmk_config, async { #extra_task }),
                 };
                 tasks.push(rmk_task);
                 if !processors.is_empty() {
@@ -203,25 +215,40 @@ pub(crate) fn rmk_entry_unibody(
     } else {
         quote! {}
     };
+
+    // Generate extra_task for custom parallel execution (e.g., display)
+    // When "display" feature is enabled, call user's run_display function
+    // User must define: pub async fn run_display(i2c: Twim<'static>, reset: Peri<'static, P0_XX>)
+    let extra_task = quote! {
+        {
+            #[cfg(feature = "display")]
+            {
+                crate::run_display(i2c, reset_pin).await
+            }
+            #[cfg(not(feature = "display"))]
+            core::future::pending::<()>().await
+        }
+    };
+
     let communication = keyboard_config.get_communication_config().unwrap();
     match communication {
         CommunicationConfig::Usb(_) => {
             let rmk_task = quote! {
-                ::rmk::run_rmk(#keymap driver, #storage rmk_config)
+                ::rmk::run_rmk(#keymap driver, #storage rmk_config, async { #extra_task })
             };
             tasks.push(rmk_task);
             join_all_tasks(tasks)
         }
         CommunicationConfig::Ble(_) => {
             let rmk_task = quote! {
-                ::rmk::run_rmk(#keymap &stack, #storage rmk_config)
+                ::rmk::run_rmk(#keymap &stack, #storage rmk_config, async { #extra_task })
             };
             tasks.push(rmk_task);
             join_all_tasks(tasks)
         }
         CommunicationConfig::Both(_, _) => {
             let rmk_task = quote! {
-                ::rmk::run_rmk(#keymap driver, &stack, #storage rmk_config)
+                ::rmk::run_rmk(#keymap driver, &stack, #storage rmk_config, async { #extra_task })
             };
             tasks.push(rmk_task);
             join_all_tasks(tasks)

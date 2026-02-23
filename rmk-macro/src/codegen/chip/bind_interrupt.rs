@@ -188,6 +188,8 @@ pub(crate) fn bind_interrupt_default(
                     TIMER0 => ::nrf_sdc::mpsl::HighPrioInterruptHandler;
                     RTC0 => ::nrf_sdc::mpsl::HighPrioInterruptHandler;
                     #pmw33xx_spi_interrupts
+                    // Display I2C interrupt (TWIM0)
+                    TWISPI0 => ::embassy_nrf::twim::InterruptHandler<::embassy_nrf::peripherals::TWISPI0>;
                     #extern_irqs
                 });
 
