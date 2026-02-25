@@ -1378,8 +1378,9 @@ impl<'a, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_E
         if event.pressed {
             self.process_key_action_normal(action, event).await;
 
-            // Wait 10ms, then send release
-            Timer::after_millis(10).await;
+            // Wait tap_interval ms, then send release
+            let tap_interval = self.keymap.borrow().behavior.tap.tap_interval as u64;
+            Timer::after_millis(tap_interval).await;
 
             event.pressed = false;
             self.process_key_action_normal(action, event).await;
