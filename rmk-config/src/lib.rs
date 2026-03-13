@@ -184,6 +184,12 @@ pub struct RmkConstantsConfig {
     /// Mouse wheel interval (ms) - controls scrolling speed
     #[serde_inline_default(80)]
     pub mouse_wheel_interval: u16,
+    /// Mouse wheel delta - base wheel movement step size per tick
+    #[serde_inline_default(1_u8)]
+    pub mouse_wheel_delta: u8,
+    /// Mouse wheel max - maximum wheel distance per HID report
+    #[serde_inline_default(4_u8)]
+    pub mouse_wheel_max: u8,
     /// Maximum number of combos keyboard can store
     #[serde_inline_default(8)]
     #[serde(deserialize_with = "check_combo_max_num")]
@@ -279,6 +285,8 @@ impl Default for RmkConstantsConfig {
         Self {
             mouse_key_interval: 20,
             mouse_wheel_interval: 80,
+            mouse_wheel_delta: 1,
+            mouse_wheel_max: 4,
             combo_max_num: 8,
             combo_max_length: 4,
             fork_max_num: 8,

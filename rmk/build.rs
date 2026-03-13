@@ -50,6 +50,8 @@ fn get_constants_str(constants: RmkConstantsConfig, events: rmk_config::EventCon
     let mut constant_strs = vec![
         const_declaration!(pub(crate) MOUSE_KEY_INTERVAL = constants.mouse_key_interval),
         const_declaration!(pub(crate) MOUSE_WHEEL_INTERVAL = constants.mouse_wheel_interval),
+        const_declaration!(pub(crate) MOUSE_WHEEL_DELTA = constants.mouse_wheel_delta),
+        const_declaration!(pub(crate) MOUSE_WHEEL_MAX = constants.mouse_wheel_max),
         const_declaration!(pub(crate) COMBO_MAX_NUM = constants.combo_max_num),
         const_declaration!(pub(crate) COMBO_MAX_LENGTH = constants.combo_max_length),
         const_declaration!(pub(crate) MACRO_SPACE_SIZE = constants.macro_space_size),

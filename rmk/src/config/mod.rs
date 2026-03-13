@@ -12,7 +12,7 @@ use rmk_types::action::{MorseMode, MorseProfile};
 use crate::combo::Combo;
 use crate::fork::Fork;
 use crate::morse::Morse;
-use crate::{COMBO_MAX_NUM, FORK_MAX_NUM, MORSE_MAX_NUM, MOUSE_KEY_INTERVAL, MOUSE_WHEEL_INTERVAL};
+use crate::{COMBO_MAX_NUM, FORK_MAX_NUM, MORSE_MAX_NUM, MOUSE_KEY_INTERVAL, MOUSE_WHEEL_DELTA, MOUSE_WHEEL_INTERVAL, MOUSE_WHEEL_MAX};
 
 /// Internal configurations for RMK keyboard.
 #[derive(Default)]
@@ -270,11 +270,11 @@ impl Default for MouseKeyConfig {
             time_to_max: 50,                                // 1.0 second to max
             wheel_initial_delay_ms: 100,                    // 100ms initial wheel delay
             wheel_repeat_interval_ms: MOUSE_WHEEL_INTERVAL, // 80ms between wheel movements
-            wheel_delta: 1,                                 // 1 wheel unit per movement
+            wheel_delta: MOUSE_WHEEL_DELTA,                  // wheel unit per movement
             wheel_max_speed_multiplier: 3,                  // Conservative wheel max speed
             wheel_time_to_max: 40,                          // 0.5 second to max
             move_max: 20,                                   // Maximum movement per report
-            wheel_max: 4,                                   // Maximum wheel movement per report
+            wheel_max: MOUSE_WHEEL_MAX,                      // Maximum wheel movement per report
         }
     }
 }

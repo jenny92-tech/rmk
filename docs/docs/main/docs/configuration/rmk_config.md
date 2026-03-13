@@ -10,6 +10,10 @@ The `[rmk]` section defines configuration parameters used inside RMK. These para
 mouse_key_interval = 20
 # Mouse wheel interval (ms) - controls scrolling speed
 mouse_wheel_interval = 80
+# Mouse wheel delta - base wheel movement step size per tick
+mouse_wheel_delta = 1
+# Mouse wheel max - maximum wheel distance per HID report
+mouse_wheel_max = 4
 # Maximum number of combos keyboard can store
 combo_max_num = 8
 # Maximum number of keys pressed simultaneously in a combo
@@ -44,6 +48,8 @@ split_central_sleep_timeout_seconds = 0
 
 - `mouse_key_interval`: Mouse key interval in milliseconds, default value is 20. This parameter controls the mouse movement speed; lower values result in faster movement.
 - `mouse_wheel_interval`: Mouse wheel interval in milliseconds, default value is 80. This parameter controls the scrolling speed; lower values result in faster scrolling.
+- `mouse_wheel_delta`: Base wheel movement step size per tick, default value is 1. Higher values result in larger scroll steps per tick.
+- `mouse_wheel_max`: Maximum wheel distance per HID report, default value is 4. This caps the maximum scroll amount in a single report.
 
 ### Behavior Configuration
 
