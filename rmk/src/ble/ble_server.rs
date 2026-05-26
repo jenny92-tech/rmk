@@ -3,6 +3,8 @@ use usbd_hid::descriptor::{AsInputReport, SerializedDescriptor};
 
 use super::battery_service::BatteryService;
 use super::device_info::DeviceConfigurationService;
+#[cfg(feature = "data_channel")]
+use crate::hid::DataChannelReport;
 #[cfg(feature = "host")]
 use crate::hid::ViaReport;
 use crate::hid::{CompositeReport, CompositeReportType, HidError, HidWriterTrait, KeyboardReport, Report};
@@ -13,8 +15,20 @@ pub(crate) const CCCD_TABLE_SIZE: usize = trouble_host::config::CLIENT_ATT_TABLE
 
 // `gatt_server` compiles every member regardless of the surrounding `cfg` —
 // gating an individual field with `#[cfg(feature = "host")]` doesn't work. So
-// the whole struct is duplicated, with and without `host_service`.
-#[cfg(feature = "host")]
+// the whole struct is duplicated for every combination of optional services
+// (currently host × data_channel).
+#[cfg(all(feature = "host", feature = "data_channel"))]
+#[gatt_server]
+pub(crate) struct Server {
+    pub(crate) battery_service: BatteryService,
+    pub(crate) hid_service: HidService,
+    pub(crate) host_service: VialService,
+    pub(crate) composite_service: CompositeService,
+    pub(crate) device_config_service: DeviceConfigurationService,
+    pub(crate) data_channel_service: DataChannelService,
+}
+
+#[cfg(all(feature = "host", not(feature = "data_channel")))]
 #[gatt_server]
 pub(crate) struct Server {
     pub(crate) battery_service: BatteryService,
@@ -47,13 +61,42 @@ pub(crate) struct VialService {
     pub(crate) output_data: [u8; 32],
 }
 
-#[cfg(not(feature = "host"))]
+#[cfg(all(not(feature = "host"), feature = "data_channel"))]
 #[gatt_server]
 pub(crate) struct Server {
     pub(crate) battery_service: BatteryService,
     pub(crate) hid_service: HidService,
     pub(crate) composite_service: CompositeService,
     pub(crate) device_config_service: DeviceConfigurationService,
+    pub(crate) data_channel_service: DataChannelService,
+}
+
+#[cfg(all(not(feature = "host"), not(feature = "data_channel")))]
+#[gatt_server]
+pub(crate) struct Server {
+    pub(crate) battery_service: BatteryService,
+    pub(crate) hid_service: HidService,
+    pub(crate) composite_service: CompositeService,
+    pub(crate) device_config_service: DeviceConfigurationService,
+}
+
+/// Vendor data-channel GATT service for the k9pad runtime protocol.
+///
+/// Base 128-bit UUID: `e9dc0000-7374-7265-616d-6b3970616400` — the trailing
+/// ASCII bytes (`streamk9pad`-ish) namespace this service to the k9pad project.
+///
+/// Companion app writes 64-byte payloads to `rx_from_host` (write-without-
+/// response → fed into `DATA_CHANNEL_RX` by the GATT events task) and
+/// subscribes to `tx_to_host` notifications (driven by
+/// `data_channel::ble::run_ble_data_channel` draining `DATA_CHANNEL_TX`).
+#[cfg(feature = "data_channel")]
+#[gatt_service(uuid = "e9dc0001-7374-7265-616d-6b3970616400")]
+pub(crate) struct DataChannelService {
+    #[characteristic(uuid = "e9dc0002-7374-7265-616d-6b3970616400", write_without_response, value = [0; 64])]
+    pub(crate) rx_from_host: [u8; 64],
+
+    #[characteristic(uuid = "e9dc0003-7374-7265-616d-6b3970616400", read, notify, value = [0; 64])]
+    pub(crate) tx_to_host: [u8; 64],
 }
 
 #[gatt_service(uuid = service::HUMAN_INTERFACE_DEVICE)]

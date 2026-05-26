@@ -136,3 +136,22 @@ pub(crate) fn try_send_host_reply(transport: ConnectionType, reply: [u8; 32]) {
 pub(crate) async fn enqueue_host_request(transport: ConnectionType, data: [u8; 32]) {
     HOST_REQUEST_CHANNEL.send((transport, data)).await;
 }
+
+// ---------------------------------------------------------------------------
+// Data channel (k9pad-style vendor RX/TX, 64-byte payloads).
+// Single bidirectional pair: both BLE and USB transports producer/consume
+// here. With only one transport active at a time the second runner simply
+// idles; if both are connected each TX packet goes to whichever runner wakes
+// up first (acceptable for streaming pushes — for request/reply use the
+// Vial-style tagged design above instead).
+// ---------------------------------------------------------------------------
+
+/// Host → device payload queue, populated by the BLE GATT write handler
+/// and the USB HID OUT report reader.
+#[cfg(feature = "data_channel")]
+pub static DATA_CHANNEL_RX: Channel<RawMutex, [u8; 64], 4> = Channel::new();
+
+/// Device → host payload queue, drained by the BLE notify runner and the
+/// USB HID IN report writer.
+#[cfg(feature = "data_channel")]
+pub static DATA_CHANNEL_TX: Channel<RawMutex, [u8; 64], 4> = Channel::new();

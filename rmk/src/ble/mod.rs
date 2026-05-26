@@ -272,6 +272,11 @@ async fn gatt_events_task(server: &Server<'_>, conn: &GattConnection<'_, '_, Def
         server.host_service.input_data,
         server.host_service.hid_control_point,
     );
+    #[cfg(feature = "data_channel")]
+    let (data_channel_rx_from_host, data_channel_tx_to_host) = (
+        server.data_channel_service.rx_from_host,
+        server.data_channel_service.tx_to_host,
+    );
     let mouse = server.composite_service.mouse_report;
     let media = server.composite_service.media_report;
     let media_control_point = server.composite_service.hid_control_point;
@@ -382,23 +387,46 @@ async fn gatt_events_task(server: &Server<'_>, conn: &GattConnection<'_, '_, Def
                                 }
                             }
                         } else {
+                            let mut matched = false;
                             #[cfg(feature = "host")]
-                            if event.handle() == output_host.handle {
-                                debug!("Got host packet: {:?}", event.data());
-                                if event.data().len() == 32 {
-                                    let mut data = [0u8; 32];
-                                    data.copy_from_slice(event.data());
-                                    crate::channel::enqueue_host_request(ConnectionType::Ble, data).await;
-                                } else {
-                                    warn!("Wrong host packet data: {:?}", event.data());
+                            {
+                                if event.handle() == output_host.handle {
+                                    debug!("Got host packet: {:?}", event.data());
+                                    if event.data().len() == 32 {
+                                        let mut data = [0u8; 32];
+                                        data.copy_from_slice(event.data());
+                                        crate::channel::enqueue_host_request(ConnectionType::Ble, data).await;
+                                    } else {
+                                        warn!("Wrong host packet data: {:?}", event.data());
+                                    }
+                                    matched = true;
+                                } else if event.handle() == input_host.cccd_handle.expect("No CCCD for input host") {
+                                    cccd_updated = true;
+                                    matched = true;
                                 }
-                            } else if event.handle() == input_host.cccd_handle.expect("No CCCD for input host") {
-                                cccd_updated = true;
-                            } else {
+                            }
+                            #[cfg(feature = "data_channel")]
+                            if !matched {
+                                if event.handle() == data_channel_rx_from_host.handle {
+                                    if event.data().len() == 64 {
+                                        let mut data = [0u8; 64];
+                                        data.copy_from_slice(event.data());
+                                        // Drop on full — app is expected to keep up.
+                                        let _ = crate::channel::DATA_CHANNEL_RX.try_send(data);
+                                    } else {
+                                        warn!("Wrong data channel packet length: {:?}", event.data().len());
+                                    }
+                                    matched = true;
+                                } else if event.handle()
+                                    == data_channel_tx_to_host.cccd_handle.expect("No CCCD for data channel tx")
+                                {
+                                    cccd_updated = true;
+                                    matched = true;
+                                }
+                            }
+                            if !matched {
                                 debug!("Write GATT Event to Unknown: {:?}", event.handle());
                             }
-                            #[cfg(not(feature = "host"))]
-                            debug!("Write GATT Event to Unknown: {:?}", event.handle());
                         }
 
                         if conn.raw().security_level()?.encrypted() {
@@ -692,7 +720,13 @@ async fn run_ble_keyboard<
     #[cfg(not(feature = "host"))]
     let host_task = core::future::pending::<()>();
 
-    let inner = embassy_futures::join::join3(writer_task, led_task, host_task);
+    #[cfg(feature = "data_channel")]
+    let data_channel_task =
+        crate::data_channel::ble::run_ble_data_channel(server.data_channel_service.tx_to_host, conn);
+    #[cfg(not(feature = "data_channel"))]
+    let data_channel_task = core::future::pending::<()>();
+
+    let inner = embassy_futures::join::join4(writer_task, led_task, host_task, data_channel_task);
     select(communication_task, inner).await;
 }
 

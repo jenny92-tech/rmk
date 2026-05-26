@@ -1,7 +1,7 @@
 use embassy_futures::join::join4;
 use embassy_futures::select::{Either, select};
 use embassy_sync::signal::Signal;
-#[cfg(feature = "host")]
+#[cfg(any(feature = "host", feature = "data_channel"))]
 use embassy_usb::class::hid::HidReaderWriter;
 use embassy_usb::class::hid::{HidReader, HidWriter, ReportId, RequestHandler};
 use embassy_usb::control::OutResponse;
@@ -15,6 +15,8 @@ use crate::RawMutex;
 use crate::channel::USB_REPORT_CHANNEL;
 use crate::config::DeviceConfig;
 use crate::core_traits::Runnable;
+#[cfg(feature = "data_channel")]
+use crate::hid::DataChannelReport;
 #[cfg(feature = "steno")]
 use crate::hid::StenoReport;
 #[cfg(feature = "host")]
@@ -160,10 +162,14 @@ pub(crate) fn new_usb_builder<'d, D: Driver<'d>>(driver: D, keyboard_config: Dev
     usb_config.device_protocol = 0x01;
     usb_config.composite_with_iads = true;
 
-    // Extra HID interfaces (usb_log, steno) overflow the 128-byte config descriptor buffer.
+    // Extra HID interfaces overflow the 128-byte config descriptor buffer.
+    // usb_log / steno push it well past 192, so they get 256.
+    // data_channel alone only needs ~192 — keep it tight when usb_log/steno are off.
     #[cfg(any(feature = "usb_log", feature = "steno"))]
     const USB_BUF_SIZE: usize = 256;
-    #[cfg(not(any(feature = "usb_log", feature = "steno")))]
+    #[cfg(all(not(any(feature = "usb_log", feature = "steno")), feature = "data_channel"))]
+    const USB_BUF_SIZE: usize = 192;
+    #[cfg(not(any(feature = "usb_log", feature = "steno", feature = "data_channel")))]
     const USB_BUF_SIZE: usize = 128;
 
     static CONFIG_DESC: StaticCell<[u8; USB_BUF_SIZE]> = StaticCell::new();
@@ -198,6 +204,10 @@ pub struct UsbTransport<D: Driver<'static>> {
     steno_writer: HidWriter<'static, D, 9>,
     #[cfg(feature = "host")]
     host_rw: HidReaderWriter<'static, D, 32, 32>,
+    #[cfg(feature = "data_channel")]
+    data_channel_reader: HidReader<'static, D, 64>,
+    #[cfg(feature = "data_channel")]
+    data_channel_writer: HidWriter<'static, D, 64>,
     #[cfg(feature = "usb_log")]
     logger: Option<embassy_usb::class::cdc_acm::CdcAcmClass<'static, D>>,
 }
@@ -230,10 +240,14 @@ impl<D: Driver<'static>> UsbTransport<D> {
         let steno_writer = add_usb_writer!(&mut builder, StenoReport, 9, 16);
         #[cfg(feature = "host")]
         let host_rw = add_usb_reader_writer!(&mut builder, ViaReport, 32, 32, 32);
+        #[cfg(feature = "data_channel")]
+        let data_channel_rw = add_usb_reader_writer!(&mut builder, DataChannelReport, 64, 64, 64);
         #[cfg(feature = "usb_log")]
         let logger = Some(add_usb_logger!(&mut builder));
 
         let (keyboard_reader, keyboard_writer) = keyboard_rw.split();
+        #[cfg(feature = "data_channel")]
+        let (data_channel_reader, data_channel_writer) = data_channel_rw.split();
         let device = builder.build();
 
         Self {
@@ -245,6 +259,10 @@ impl<D: Driver<'static>> UsbTransport<D> {
             steno_writer,
             #[cfg(feature = "host")]
             host_rw,
+            #[cfg(feature = "data_channel")]
+            data_channel_reader,
+            #[cfg(feature = "data_channel")]
+            data_channel_writer,
             #[cfg(feature = "usb_log")]
             logger,
         }
@@ -262,6 +280,10 @@ impl<D: Driver<'static>> Runnable for UsbTransport<D> {
             steno_writer,
             #[cfg(feature = "host")]
             host_rw,
+            #[cfg(feature = "data_channel")]
+            data_channel_reader,
+            #[cfg(feature = "data_channel")]
+            data_channel_writer,
             #[cfg(feature = "usb_log")]
             logger,
         } = self;
@@ -299,6 +321,12 @@ impl<D: Driver<'static>> Runnable for UsbTransport<D> {
             #[cfg(not(feature = "host"))]
             let host_task = core::future::pending::<()>();
 
+            #[cfg(feature = "data_channel")]
+            let data_channel_task =
+                crate::data_channel::usb::run_usb_data_channel(data_channel_reader, data_channel_writer);
+            #[cfg(not(feature = "data_channel"))]
+            let data_channel_task = core::future::pending::<()>();
+
             #[cfg(feature = "usb_log")]
             {
                 let logger_class = logger.take().expect("UsbTransport::run called twice");
@@ -312,10 +340,10 @@ impl<D: Driver<'static>> Runnable for UsbTransport<D> {
                         let _ = write!(writer, "[{:>8}ms {:5}] {}\r\n", ms, record.level(), record.args());
                     }
                 );
-                embassy_futures::join::join(host_task, logger_fut).await;
+                embassy_futures::join::join3(host_task, data_channel_task, logger_fut).await;
             }
             #[cfg(not(feature = "usb_log"))]
-            host_task.await;
+            embassy_futures::join::join(host_task, data_channel_task).await;
         };
 
         join4(usb_device_task, writer_task, led_task, host_and_extras).await;

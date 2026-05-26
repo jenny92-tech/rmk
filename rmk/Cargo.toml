@@ -129,6 +129,18 @@ rmk_protocol = ["host", "host_security", "dep:postcard-rpc", "rmk-types/rmk_prot
 ## Enable bulk transfer endpoints for RMK protocol on MCUs with sufficient RAM
 bulk_transfer = ["rmk_protocol", "rmk-types/bulk"]
 
+## Enable controller runtime API: menu intercept, deferred keys, manual key send,
+## key event subscriber, BLE profile / default-layer switch helpers.
+## Public surface lives in `rmk::controller` (plus `set_default_layer`,
+## `switch_ble_profile`, `clear_ble_bond` at the lib root).
+controller = []
+
+## Enable the k9pad data channel (RX/TX of 64-byte payloads over BLE GATT
+## and/or USB HID), as an extra host-facing channel alongside Vial/RMK protocol.
+## Adds a vendor GATT service (UUID base e9dc0000-7374-7265-616d-6b3970616400)
+## and a vendor HID interface (usage page 0xFF61).
+data_channel = []
+
 ## Enable the storage. The storage is optional to save memory
 storage = [
     "dep:embedded-storage",
