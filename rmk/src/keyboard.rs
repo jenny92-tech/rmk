@@ -1314,8 +1314,8 @@ impl<'a> Keyboard<'a> {
         if event.pressed {
             self.process_key_action_normal(action, event).await;
 
-            // Wait 10ms, then send release
-            Timer::after_millis(10).await;
+            // Wait tap_interval ms, then send release
+            Timer::after_millis(self.keymap.tap_interval() as u64).await;
 
             event.pressed = false;
             self.process_key_action_normal(action, event).await;
