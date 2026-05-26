@@ -142,6 +142,14 @@ impl Runnable for Keyboard<'_> {
     /// The report is sent using `send_report`.
     async fn run(&mut self) -> ! {
         loop {
+            // Drain runtime control queues each tick. These are cheap try_*
+            // operations so they don't add measurable latency when idle.
+            #[cfg(feature = "controller")]
+            crate::controller::process_pending_keycodes();
+            while let Ok(layer) = crate::PENDING_DEFAULT_LAYER.try_receive() {
+                self.keymap.set_default_layer(layer);
+            }
+
             // TODO: Now the unprocessed_events is only used in one-shot keys and clear peer key.
             // Maybe it can be removed in the future?
             if !self.unprocessed_events.is_empty() {
@@ -374,6 +382,38 @@ impl<'a> Keyboard<'a> {
 
         // Process key
         let key_action = &self.keymap.get_action_with_layer_cache(event);
+
+        // ===== Controller integration =====
+        // Publish observability events, then check whether the app wants to
+        // intercept this key (menu mode) or fully defer its handling.
+        //
+        // Hold-tap timing is **not** provided by this hook — companion apps
+        // build their own using embassy_time::Timer racing the subscriber
+        // and call controller::send_keycode to fire the tap action on
+        // short-release.
+        #[cfg(feature = "controller")]
+        {
+            crate::controller::publish_key_event(crate::controller::KeyEvent {
+                keyboard_event: event,
+                key_action: *key_action,
+            });
+            match event.pos {
+                KeyboardEventPos::Key(pos) => {
+                    if crate::controller::should_intercept_key(pos.row, pos.col) {
+                        return;
+                    }
+                    if crate::controller::is_deferred_key(pos.row, pos.col) {
+                        return;
+                    }
+                }
+                KeyboardEventPos::RotaryEncoder(_) => {
+                    if crate::controller::should_intercept_encoder() {
+                        return;
+                    }
+                }
+            }
+        }
+        // ===== End controller integration =====
 
         if self.combo_on {
             if let (Some(key_action), is_combo) = self.process_combo(key_action, event, event_time).await {

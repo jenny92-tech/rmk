@@ -71,7 +71,7 @@ impl Default for ProfileInfo {
 }
 
 /// BLE profile switch action
-pub(crate) enum BleProfileAction {
+pub enum BleProfileAction {
     Switch(u8),
     Previous,
     Next,

@@ -81,6 +81,10 @@ pub mod ble;
 pub mod boot;
 pub mod channel;
 pub mod config;
+#[cfg(feature = "controller")]
+pub mod controller;
+#[cfg(feature = "data_channel")]
+pub mod data_channel;
 pub mod core_traits;
 #[cfg(feature = "dfu_split")]
 pub mod crc32;
@@ -119,6 +123,35 @@ pub mod watchdog;
 #[cfg(any(test, feature = "std"))]
 #[doc(hidden)]
 pub mod test_support;
+
+// ---------------------------------------------------------------------------
+// Runtime control helpers (thin wrappers around existing channels)
+// ---------------------------------------------------------------------------
+
+/// Pending default-layer switch requests. Drained by the keyboard task each
+/// scan tick and forwarded to `KeyMap::set_default_layer`.
+pub(crate) static PENDING_DEFAULT_LAYER: embassy_sync::channel::Channel<RawMutex, u8, 4> =
+    embassy_sync::channel::Channel::new();
+
+/// Request the keyboard to switch its default keymap layer at runtime. The
+/// change takes effect on the next scan tick. Silently drops if the queue
+/// (depth 4) is already full.
+pub fn set_default_layer(layer: u8) {
+    let _ = PENDING_DEFAULT_LAYER.try_send(layer);
+}
+
+/// Switch to BLE profile `profile` (0-based). Drops silently when the BLE
+/// task isn't consuming (e.g. USB-only build, or profile manager idle).
+#[cfg(feature = "_ble")]
+pub fn switch_ble_profile(profile: u8) {
+    let _ = channel::BLE_PROFILE_CHANNEL.try_send(ble::profile::BleProfileAction::Switch(profile));
+}
+
+/// Clear the bonding info of the currently active BLE profile.
+#[cfg(feature = "_ble")]
+pub fn clear_ble_bond() {
+    let _ = channel::BLE_PROFILE_CHANNEL.try_send(ble::profile::BleProfileAction::ClearBond);
+}
 
 pub async fn initialize_keymap<
     'a,

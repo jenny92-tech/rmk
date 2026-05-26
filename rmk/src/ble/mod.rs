@@ -392,6 +392,11 @@ async fn gatt_events_task(server: &Server<'_>, conn: &GattConnection<'_, '_, Def
     let mouse = server.hid_service.mouse_report;
     let media = server.hid_service.media_report;
     let system_control = server.hid_service.system_report;
+    #[cfg(feature = "data_channel")]
+    let (data_channel_rx_from_host, data_channel_tx_to_host) = (
+        server.data_channel_service.rx_from_host,
+        server.data_channel_service.tx_to_host,
+    );
 
     #[cfg(feature = "passkey_entry")]
     let mut passkey_state = PasskeyInputState::new();
@@ -464,11 +469,17 @@ async fn gatt_events_task(server: &Server<'_>, conn: &GattConnection<'_, '_, Def
 
                         // trouble-host 0.7 exposes written bytes via a closure; copy them out
                         // once so the dispatch below (which awaits) can use them freely.
-                        // Sized for the active host protocol's largest BLE write.
+                        // Sized for the largest BLE write among active protocols
+                        // (host protocol chunks, 64-byte data_channel payloads).
                         #[cfg(feature = "host")]
-                        let mut data_buf = [0u8; HOST_WRITE_BUFFER_SIZE];
+                        const HOST_BUF_SIZE: usize = HOST_WRITE_BUFFER_SIZE;
                         #[cfg(not(feature = "host"))]
-                        let mut data_buf = [0u8; 32];
+                        const HOST_BUF_SIZE: usize = 32;
+                        #[cfg(feature = "data_channel")]
+                        const WRITE_BUF_SIZE: usize = if HOST_BUF_SIZE > 64 { HOST_BUF_SIZE } else { 64 };
+                        #[cfg(not(feature = "data_channel"))]
+                        const WRITE_BUF_SIZE: usize = HOST_BUF_SIZE;
+                        let mut data_buf = [0u8; WRITE_BUF_SIZE];
                         let data_len = event.with_data(|_, data| {
                             let n = data.len().min(data_buf.len());
                             data_buf[..n].copy_from_slice(&data[..n]);
@@ -495,17 +506,42 @@ async fn gatt_events_task(server: &Server<'_>, conn: &GattConnection<'_, '_, Def
                         } else if event.handle() == hid_control_point.handle {
                             control_point_write = true;
                         } else {
-                            #[cfg(feature = "host")]
-                            match host_gatt_handler.handle_write(event.handle(), data, encrypted).await {
-                                HostWriteOutcome::Handled => {}
-                                HostWriteOutcome::CccdUpdated => cccd_updated = true,
-                                HostWriteOutcome::ControlPoint => control_point_write = true,
-                                HostWriteOutcome::Unhandled => {
-                                    debug!("Write GATT Event to Unknown: {:?}", event.handle())
+                            #[cfg(feature = "data_channel")]
+                            let matched = if event.handle() == data_channel_rx_from_host.handle {
+                                if data.len() == 64 {
+                                    let mut payload = [0u8; 64];
+                                    payload.copy_from_slice(data);
+                                    // Drop on full — app is expected to keep up.
+                                    let _ = crate::channel::DATA_CHANNEL_RX.try_send(payload);
+                                } else {
+                                    warn!("Wrong data channel packet length: {}", data_len);
                                 }
+                                true
+                            } else if event.handle()
+                                == data_channel_tx_to_host
+                                    .cccd_handle
+                                    .expect("No CCCD for data channel tx")
+                            {
+                                cccd_updated = true;
+                                true
+                            } else {
+                                false
+                            };
+                            #[cfg(not(feature = "data_channel"))]
+                            let matched = false;
+                            if !matched {
+                                #[cfg(feature = "host")]
+                                match host_gatt_handler.handle_write(event.handle(), data, encrypted).await {
+                                    HostWriteOutcome::Handled => {}
+                                    HostWriteOutcome::CccdUpdated => cccd_updated = true,
+                                    HostWriteOutcome::ControlPoint => control_point_write = true,
+                                    HostWriteOutcome::Unhandled => {
+                                        debug!("Write GATT Event to Unknown: {:?}", event.handle())
+                                    }
+                                }
+                                #[cfg(not(feature = "host"))]
+                                debug!("Write GATT Event to Unknown: {:?}", event.handle());
                             }
-                            #[cfg(not(feature = "host"))]
-                            debug!("Write GATT Event to Unknown: {:?}", event.handle());
                         }
 
                         if control_point_write {
@@ -825,7 +861,13 @@ async fn run_ble_keyboard<
     #[cfg(not(feature = "host"))]
     let host_task = core::future::pending::<()>();
 
-    let inner = embassy_futures::join::join3(writer_task, led_task, host_task);
+    #[cfg(feature = "data_channel")]
+    let data_channel_task =
+        crate::data_channel::ble::run_ble_data_channel(server.data_channel_service.tx_to_host, conn);
+    #[cfg(not(feature = "data_channel"))]
+    let data_channel_task = core::future::pending::<()>();
+
+    let inner = embassy_futures::join::join4(writer_task, led_task, host_task, data_channel_task);
     select(communication_task, inner).await;
 }
 

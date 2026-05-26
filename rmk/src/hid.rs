@@ -87,6 +87,35 @@ const _: () = core::assert!(
     "RynkHidReport literal length must equal RYNK_HID_REPORT_SIZE"
 );
 
+/// Vendor HID report for the k9pad data channel — a 64-byte bidirectional
+/// payload on usage page `0xFF61` (distinct from Via's `0xFF60`).
+/// Gated by the `data_channel` feature.
+#[cfg(feature = "data_channel")]
+#[gen_hid_descriptor(
+    (collection = APPLICATION, usage_page = 0xFF61, usage = 0x01) = {
+        (usage = 0x02, logical_min = 0x0) = {
+            #[item_settings(data,variable,absolute)] input_data=input;
+        };
+        (usage = 0x03, logical_min = 0x0) = {
+            #[item_settings(data,variable,absolute)] output_data=output;
+        };
+    }
+)]
+pub struct DataChannelReport {
+    pub input_data: [u8; 64],
+    pub output_data: [u8; 64],
+}
+
+#[cfg(feature = "data_channel")]
+impl Default for DataChannelReport {
+    fn default() -> Self {
+        Self {
+            input_data: [0u8; 64],
+            output_data: [0u8; 64],
+        }
+    }
+}
+
 /// Predefined report ids for composite hid report.
 /// Should be same with `#[gen_hid_descriptor]` of `CompositeReport` and `BleCompositeReport`
 /// DO NOT EDIT
