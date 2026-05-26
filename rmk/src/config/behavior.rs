@@ -4,7 +4,9 @@ use rmk_types::fork::Fork;
 use rmk_types::morse::{Morse, MorseMode, MorseProfile};
 
 use crate::keyboard::combo::Combo;
-use crate::{COMBO_MAX_NUM, FORK_MAX_NUM, MACRO_SPACE_SIZE, MORSE_MAX_NUM, MOUSE_KEY_INTERVAL, MOUSE_WHEEL_INTERVAL};
+use crate::{
+    COMBO_MAX_NUM, FORK_MAX_NUM, MACRO_SPACE_SIZE, MORSE_MAX_NUM, MOUSE_KEY_INTERVAL, MOUSE_WHEEL_DELTA, MOUSE_WHEEL_INTERVAL, MOUSE_WHEEL_MAX,
+};
 
 /// Config for configurable action behavior
 #[derive(Debug, Default)]
@@ -172,11 +174,11 @@ impl Default for MouseKeyConfig {
             ticks_to_max: 50,                               // 50 ticks to max speed (~1s)
             wheel_initial_delay_ms: 100,                    // 100ms initial wheel delay
             wheel_repeat_interval_ms: MOUSE_WHEEL_INTERVAL, // 80ms between wheel movements
-            wheel_delta: 1,                                 // 1 wheel unit per movement
+            wheel_delta: MOUSE_WHEEL_DELTA,                 // wheel unit per movement (configurable)
             wheel_max_speed: 2,                             // Wheel max speed multiplier
             wheel_ticks_to_max: 40,                         // 40 ticks to max wheel speed (~3.2s)
             move_max: 25,                                   // Maximum movement per report
-            wheel_max: 4,                                   // Maximum wheel movement per report
+            wheel_max: MOUSE_WHEEL_MAX,                     // Maximum wheel movement per report (configurable)
         }
     }
 }

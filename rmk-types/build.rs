@@ -48,6 +48,14 @@ fn generate_constants(bc: &BuildConstants) -> String {
         "pub const MOUSE_WHEEL_INTERVAL: u16 = {};",
         bc.mouse_wheel_interval
     ));
+    lines.push(format!(
+        "pub const MOUSE_WHEEL_DELTA: u8 = {};",
+        bc.mouse_wheel_delta
+    ));
+    lines.push(format!(
+        "pub const MOUSE_WHEEL_MAX: u8 = {};",
+        bc.mouse_wheel_max
+    ));
     lines.push(format!("pub const COMBO_MAX_NUM: usize = {};", bc.combo_max_num));
     lines.push(format!("pub const COMBO_MAX_LENGTH: usize = {};", bc.combo_max_length));
     lines.push(format!("pub const MACRO_SPACE_SIZE: usize = {};", bc.macro_space_size));
