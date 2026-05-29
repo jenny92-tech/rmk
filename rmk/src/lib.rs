@@ -60,9 +60,9 @@ pub mod channel;
 pub mod config;
 #[cfg(feature = "controller")]
 pub mod controller;
+pub mod core_traits;
 #[cfg(feature = "data_channel")]
 pub mod data_channel;
-pub mod core_traits;
 pub mod debounce;
 #[cfg(feature = "display")]
 pub mod display;
@@ -124,6 +124,33 @@ pub fn switch_ble_profile(profile: u8) {
 #[cfg(feature = "_ble")]
 pub fn clear_ble_bond() {
     let _ = channel::BLE_PROFILE_CHANNEL.try_send(ble::profile::BleProfileAction::ClearBond);
+}
+
+/// 请求“重置键位配置”：使存储的布局哈希失效。下次启动时 RMK 会用编译默认重写
+/// keymap/encoder/布局/behavior，但**保留 BLE 配对与宏**。
+///
+/// 该函数等待写入落盘后返回；调用方随后应重启设备
+/// (如 `cortex_m::peripheral::SCB::sys_reset()`) 使重置在启动路径生效。
+#[cfg(feature = "storage")]
+pub async fn request_keyboard_config_reset() {
+    crate::storage::FLASH_OPERATION_FINISHED.reset();
+    crate::channel::FLASH_CHANNEL
+        .send(crate::storage::FlashOperationMessage::InvalidateLayoutHash)
+        .await;
+    crate::storage::FLASH_OPERATION_FINISHED.wait().await;
+}
+
+/// 请求“全部删除”：擦除整个 RMK 存储区（keymap/encoder/宏/combo/fork/morse/布局/
+/// **BLE 配对** 全部清空）。
+///
+/// 该函数等待擦除落盘后返回；调用方随后应重启设备，启动时会从编译默认重建。
+#[cfg(feature = "storage")]
+pub async fn reset_all_storage() {
+    crate::storage::FLASH_OPERATION_FINISHED.reset();
+    crate::channel::FLASH_CHANNEL
+        .send(crate::storage::FlashOperationMessage::Reset)
+        .await;
+    crate::storage::FLASH_OPERATION_FINISHED.wait().await;
 }
 
 pub async fn initialize_keymap<

@@ -22,10 +22,71 @@ use {
 #[cfg(feature = "_ble")]
 use crate::ble::profile::ProfileInfo;
 use crate::channel::FLASH_CHANNEL;
+use crate::config;
 use crate::config::StorageConfig;
 #[cfg(all(feature = "_ble", feature = "split"))]
 use crate::split::ble::PeerAddress;
-use crate::{BUILD_HASH, config};
+
+/// FNV-1a 32-bit：把一段字节累积进 `hash`。
+#[cfg(feature = "host")]
+fn fnv1a(mut hash: u32, bytes: &[u8]) -> u32 {
+    for &b in bytes {
+        hash ^= b as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash
+}
+
+/// 计算编译进固件的 keymap + encoder 布局的稳定内容哈希。
+///
+/// 用 postcard 把每个 `KeyAction`/`EncoderAction` 序列化成字节，再做 FNV-1a。
+/// 同一布局在任意机器、任意次编译都得到相同值；只有布局内容真正改变时才变化。
+///
+/// 背景：RMK 上游用 build.rs 的 `BUILD_HASH`（混入了编译时刻的纳秒时间戳）作为存储
+/// 有效性判据，导致每次重编固件 / 更新 RMK 都会清空整个存储区（丢 keymap / BLE 配对 /
+/// 宏）。K9-Pad 改用本布局哈希：存储跨刷机保留，仅当 keymap/encoder 布局真的变了才重置。
+///
+/// 注意：behavior 配置（combos / forks / morse / 宏）不纳入哈希，改这些不会自动重置，
+/// 需要时由用户在设备菜单主动触发 `FlashOperationMessage::Reset`。
+#[cfg(feature = "host")]
+fn compute_layout_hash<const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_ENCODER: usize>(
+    keymap: &[[[KeyAction; COL]; ROW]; NUM_LAYER],
+    encoder_map: &Option<&mut [[EncoderAction; NUM_ENCODER]; NUM_LAYER]>,
+) -> u32 {
+    let mut hash: u32 = 0x811c_9dc5; // FNV-1a offset basis
+    let mut kbuf = [0u8; KeyAction::POSTCARD_MAX_SIZE];
+    for layer in keymap.iter() {
+        for row in layer.iter() {
+            for action in row.iter() {
+                if let Ok(used) = postcard::to_slice(action, &mut kbuf) {
+                    hash = fnv1a(hash, used);
+                }
+            }
+        }
+    }
+    if let Some(encoder_map) = encoder_map {
+        let mut ebuf = [0u8; EncoderAction::POSTCARD_MAX_SIZE];
+        for layer in encoder_map.iter() {
+            for action in layer.iter() {
+                if let Ok(used) = postcard::to_slice(action, &mut ebuf) {
+                    hash = fnv1a(hash, used);
+                }
+            }
+        }
+    }
+    hash
+}
+
+/// 存储有效性的三态判定结果（见 `Storage::storage_state`）。
+enum StorageState {
+    /// 没有有效的 `StorageConfig`（首次启动 / 上次初始化失败）。需全量初始化。
+    Fresh,
+    /// 已初始化，但布局哈希与当前固件不符（改了 keymap，或被菜单主动失效）。
+    /// host 构建下用 `reset_layout_only` 重写布局并保留 BLE 配对。
+    Stale,
+    /// 已初始化且哈希匹配，存储有效，无需处理。
+    Valid,
+}
 
 /// Signal to synchronize the flash operation status, usually used outside of the flash task.
 /// True if the flash operation is finished correctly, false if the flash operation is finished with error.
@@ -98,6 +159,9 @@ pub(crate) enum FlashOperationMessage {
     PeerAddress(PeerAddress),
     // Clear the storage
     Reset,
+    // K9-Pad：把存储的布局哈希写成哨兵值（保持 enable=true），使下次启动判为 Stale →
+    // 仅重置布局并保留 BLE 配对。用于菜单"重置键位配置"。
+    InvalidateLayoutHash,
     // Clear the layout info
     ResetLayout,
     #[cfg(feature = "_ble")]
@@ -454,15 +518,32 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
             buffer: [0; get_buffer_size()],
         };
 
-        // Check whether keymap and configs have been storaged in flash
-        if !storage.check_enable().await || storage_config.clear_storage {
+        // K9-Pad：用编译布局的内容哈希替代 build.rs 的 BUILD_HASH 作为存储有效性判据，
+        // 使存储跨刷机/重编保留，仅当 keymap/encoder 布局真正变化时才重置。
+        #[cfg(feature = "host")]
+        let expected_hash = compute_layout_hash(keymap, encoder_map);
+        #[cfg(not(feature = "host"))]
+        let expected_hash = crate::BUILD_HASH;
+
+        let state = storage.storage_state(expected_hash).await;
+
+        // 全量初始化(擦除一切——含 BLE 配对——再写默认)的条件：
+        //  - 配置要求 clear_storage；或
+        //  - Fresh（首次启动/上次初始化失败，没什么可保留）；或
+        //  - 非 host 构建下的 Stale（无 keymap 可单独重写，退回全量，等价于旧行为）。
+        let full_init = storage_config.clear_storage
+            || matches!(state, StorageState::Fresh)
+            || (cfg!(not(feature = "host")) && matches!(state, StorageState::Stale));
+
+        if full_init {
             // Clear storage first
-            debug!("Clearing storage!");
+            debug!("Initializing storage (full erase + defaults)!");
             let _ = storage.flash.erase_all().await;
 
             // Initialize storage from keymap and config
             if storage
                 .initialize_storage_with_config(
+                    expected_hash,
                     #[cfg(feature = "host")]
                     keymap,
                     #[cfg(feature = "host")]
@@ -478,11 +559,29 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
                         StorageKey::StorageConfig,
                         &StorageData::from(LocalStorageConfig {
                             enable: false,
-                            build_hash: BUILD_HASH,
+                            build_hash: expected_hash,
                         }),
                     )
                     .await
                     .ok();
+            }
+        } else if matches!(state, StorageState::Stale) {
+            // host-only：布局哈希变了(改了 keyboard.toml 的 keymap，或菜单触发了"重置键位配置")。
+            // 重写 keymap/encoder/布局/behavior 为编译默认，但**保留 BLE 配对与宏**，并刷新存储哈希。
+            #[cfg(feature = "host")]
+            {
+                debug!("Layout hash changed; resetting layout only (BLE bonds kept).");
+                let encoder_ref = encoder_map.as_ref().map(|m| &**m);
+                let _ = storage.reset_layout_only(keymap, &encoder_ref, behavior_config).await;
+                let _ = storage
+                    .store_data(
+                        StorageKey::StorageConfig,
+                        &StorageData::from(LocalStorageConfig {
+                            enable: true,
+                            build_hash: expected_hash,
+                        }),
+                    )
+                    .await;
             }
         } else if storage_config.clear_layout {
             #[cfg(feature = "host")]
@@ -521,16 +620,17 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
 
     async fn initialize_storage_with_config(
         &mut self,
+        build_hash_value: u32,
         #[cfg(feature = "host")] keymap: &[[[KeyAction; COL]; ROW]; NUM_LAYER],
         #[cfg(feature = "host")] encoder_map: &Option<&mut [[EncoderAction; NUM_ENCODER]; NUM_LAYER]>,
         behavior: &config::BehaviorConfig,
     ) -> Result<(), ()> {
-        // Save storage config
+        // Save storage config（build_hash 字段在 host 构建下存的是布局哈希）
         self.store_data(
             StorageKey::StorageConfig,
             &StorageData::from(LocalStorageConfig {
                 enable: true,
-                build_hash: BUILD_HASH,
+                build_hash: build_hash_value,
             }),
         )
         .await
@@ -631,14 +731,21 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
         Ok(())
     }
 
-    async fn check_enable(&mut self) -> bool {
-        if let Some(StorageData::StorageConfig(config)) = self.fetch_data(StorageKey::StorageConfig).await
-            && config.enable
-            && config.build_hash == BUILD_HASH
-        {
-            return true;
+    /// 判断存储当前处于哪种状态(见 `StorageState`)。
+    ///
+    /// `expected_hash`：host 构建为编译 keymap/encoder 的布局哈希(见 `compute_layout_hash`)，
+    /// 非 host 构建为 `BUILD_HASH`。
+    async fn storage_state(&mut self, expected_hash: u32) -> StorageState {
+        match self.fetch_data(StorageKey::StorageConfig).await {
+            Some(StorageData::StorageConfig(config)) if config.enable => {
+                if config.build_hash == expected_hash {
+                    StorageState::Valid
+                } else {
+                    StorageState::Stale
+                }
+            }
+            _ => StorageState::Fresh,
         }
-        false
     }
 
     /// Read all peripheral addresses from flash at startup, returning a `RefCell`
@@ -712,6 +819,18 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
                     update_storage_field!(&mut self.flash, &mut self.buffer, LayoutConfig, layout_option)
                 }
                 FlashOperationMessage::Reset => self.flash.erase_all().await,
+                FlashOperationMessage::InvalidateLayoutHash => {
+                    // 写入哨兵布局哈希(0)且保持 enable=true。下次启动 `storage_state` 判为
+                    // Stale → `reset_layout_only` 重写布局、保留配对。用于菜单"重置键位配置"。
+                    self.store_data(
+                        StorageKey::StorageConfig,
+                        &StorageData::from(LocalStorageConfig {
+                            enable: true,
+                            build_hash: 0,
+                        }),
+                    )
+                    .await
+                }
                 FlashOperationMessage::ResetLayout => {
                     info!("Ignoring ResetLayout at runtime (handled at startup via clear_layout).");
                     Ok(())
@@ -1006,7 +1125,7 @@ mod tests {
     }
 
     #[test]
-    fn build_hash_mismatch_reinitializes_storage() {
+    fn layout_hash_mismatch_reinitializes_storage() {
         block_on(async {
             type Flash = TestFlash<16_384, 4_096, 1>;
 
@@ -1020,7 +1139,7 @@ mod tests {
                 &StorageKey::StorageConfig,
                 &StorageData::StorageConfig(LocalStorageConfig {
                     enable: true,
-                    build_hash: BUILD_HASH.wrapping_sub(1),
+                    build_hash: crate::BUILD_HASH.wrapping_sub(1),
                 }),
             )
             .await
@@ -1063,13 +1182,16 @@ mod tests {
                     layout_option: 0,
                 })
             ));
-            assert!(matches!(
-                stored_config,
-                StorageData::StorageConfig(LocalStorageConfig {
-                    enable: true,
-                    build_hash: BUILD_HASH,
-                })
-            ));
+            // 重置后 build_hash 字段应等于当前布局哈希（host）或 BUILD_HASH（非 host）。
+            #[cfg(feature = "host")]
+            let expected_hash = compute_layout_hash(&keymap, &encoder_map);
+            #[cfg(not(feature = "host"))]
+            let expected_hash = crate::BUILD_HASH;
+            let StorageData::StorageConfig(cfg) = stored_config else {
+                panic!("expected StorageConfig");
+            };
+            assert!(cfg.enable);
+            assert_eq!(cfg.build_hash, expected_hash);
         });
     }
 }

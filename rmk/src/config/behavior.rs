@@ -5,7 +5,8 @@ use rmk_types::morse::{Morse, MorseMode, MorseProfile};
 
 use crate::keyboard::combo::Combo;
 use crate::{
-    COMBO_MAX_NUM, FORK_MAX_NUM, MACRO_SPACE_SIZE, MORSE_MAX_NUM, MOUSE_KEY_INTERVAL, MOUSE_WHEEL_DELTA, MOUSE_WHEEL_INTERVAL, MOUSE_WHEEL_MAX,
+    COMBO_MAX_NUM, FORK_MAX_NUM, MACRO_SPACE_SIZE, MORSE_MAX_NUM, MOUSE_KEY_INTERVAL, MOUSE_WHEEL_DELTA,
+    MOUSE_WHEEL_INTERVAL, MOUSE_WHEEL_MAX,
 };
 
 /// Config for configurable action behavior

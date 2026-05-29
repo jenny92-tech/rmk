@@ -418,7 +418,9 @@ async fn gatt_events_task(server: &Server<'_>, conn: &GattConnection<'_, '_, Def
                                     }
                                     matched = true;
                                 } else if event.handle()
-                                    == data_channel_tx_to_host.cccd_handle.expect("No CCCD for data channel tx")
+                                    == data_channel_tx_to_host
+                                        .cccd_handle
+                                        .expect("No CCCD for data channel tx")
                                 {
                                     cccd_updated = true;
                                     matched = true;

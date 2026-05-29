@@ -15,7 +15,7 @@ fn main() {
     // Compute build hash and write to constants.rs
     let build_hash = compute_build_hash();
     let constants = format!(
-        "#[allow(clippy::redundant_static_lifetimes)]\npub(crate) const BUILD_HASH: u32 = {build_hash:#010x};\n"
+        "#[allow(clippy::redundant_static_lifetimes, dead_code)]\npub(crate) const BUILD_HASH: u32 = {build_hash:#010x};\n"
     );
 
     let out_dir = env::var("OUT_DIR").unwrap();
