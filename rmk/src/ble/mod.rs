@@ -1,7 +1,7 @@
 use bt_hci::cmd::le::{LeReadLocalSupportedFeatures, LeSetPhy};
 use bt_hci::controller::{ControllerCmdAsync, ControllerCmdSync};
 use embassy_futures::join::join3;
-use embassy_futures::select::{Either, Either3, select, select3};
+use embassy_futures::select::{Either, Either3, Either4, select, select3, select4};
 use embassy_time::{Duration, Timer, with_timeout};
 use rmk_types::ble::BleState;
 use rmk_types::connection::ConnectionType;
@@ -258,83 +258,140 @@ where
     let profile_manager = &mut profile_manager;
 
     let connection_loop = async {
+        // 并发服务多条连接（CONNECTIONS_MAX=2）：accept 后不阻塞，继续 advertise 接受下一条；
+        // 每条连接的 run_ble_keyboard 在 select4 中并行轮询，连接断开后腾出槽位。
+        // 修复：旧版顺序 accept → run_ble_keyboard → 再 advertise，第二条连接（如 app 的
+        // 数据通道）永远不会被服务——写入到了设备却没人路由 → 屏幕无反应 / 命令超时。
+        let mut conn_a: Option<(
+            GattConnection<'_, '_, DefaultPacketPool>,
+            Option<crate::ble::profile::ProfileInfo>,
+        )> = None;
+        let mut conn_b: Option<(
+            GattConnection<'_, '_, DefaultPacketPool>,
+            Option<crate::ble::profile::ProfileInfo>,
+        )> = None;
+
         loop {
-            match select(
-                advertise(product_name, &mut peripheral, server),
-                profile_manager.update_profile(),
-            )
-            .await
-            {
-                Either::First(Ok(conn)) => {
-                    // Do NOT emit BleState::Connected here. gatt_events_task emits
-                    // Connected when it sees GattConnectionEvent::Encrypted.
-                    let active_bond_info = profile_manager.active_bond_info();
-                    // Check the bond info after the connection is just created.
-                    if let Some(bond) = &active_bond_info
-                        && !bond.info.identity.match_identity(&conn.raw().peer_identity())
-                    {
-                        warn!("[ble] connected peer doesn't match the active profile, disconnecting");
-                        conn.raw().disconnect();
-                        loop {
-                            if let GattConnectionEvent::Disconnected { .. } = conn.next().await {
-                                break;
-                            }
-                        }
-                        continue;
-                    }
-                    if let Either::Second(_) = select(
-                        run_ble_keyboard(
-                            server,
-                            &conn,
-                            stack,
-                            active_bond_info,
-                            config,
-                            #[cfg(feature = "host")]
-                            host_service,
-                        ),
-                        profile_manager.update_profile(),
-                    )
-                    .await
-                    {
-                        // When the profile changes, manually disconnect from the current host
-                        if conn.raw().is_connected() {
+            // 构造 4 路 select：advertise（有空槽时）/ 连接 A 服务 / 连接 B 服务 / profile 切换。
+            // 空槽位的 future 用 pending 占位；借用 conn_a/conn_b 的 future 在块结束时释放。
+            let outcome = {
+                let adv_fut = if conn_a.is_none() || conn_b.is_none() {
+                    futures::future::Either::Left(advertise(product_name, &mut peripheral, server))
+                } else {
+                    futures::future::Either::Right(core::future::pending())
+                };
+                let a_fut = match &conn_a {
+                    Some((conn, bond)) => futures::future::Either::Left(run_ble_keyboard(
+                        server,
+                        conn,
+                        stack,
+                        bond.clone(),
+                        config,
+                        #[cfg(feature = "host")]
+                        host_service,
+                    )),
+                    None => futures::future::Either::Right(core::future::pending()),
+                };
+                let b_fut = match &conn_b {
+                    Some((conn, bond)) => futures::future::Either::Left(run_ble_keyboard(
+                        server,
+                        conn,
+                        stack,
+                        bond.clone(),
+                        config,
+                        #[cfg(feature = "host")]
+                        host_service,
+                    )),
+                    None => futures::future::Either::Right(core::future::pending()),
+                };
+                select4(adv_fut, a_fut, b_fut, profile_manager.update_profile()).await
+            };
+
+            match outcome {
+                Either4::First(res) => match res {
+                    Ok(conn) => {
+                        // Do NOT emit BleState::Connected here. gatt_events_task emits
+                        // Connected when it sees GattConnectionEvent::Encrypted.
+                        let active_bond_info = profile_manager.active_bond_info();
+                        // Check the bond info after the connection is just created.
+                        if let Some(bond) = &active_bond_info
+                            && !bond.info.identity.match_identity(&conn.raw().peer_identity())
+                        {
+                            warn!("[ble] connected peer doesn't match the active profile, disconnecting");
                             conn.raw().disconnect();
                             loop {
                                 if let GattConnectionEvent::Disconnected { .. } = conn.next().await {
                                     break;
                                 }
                             }
+                            continue;
+                        }
+                        // 放入空闲槽位，继续 advertise 接受下一条连接
+                        if conn_a.is_none() {
+                            info!("[ble] accepted connection into slot A");
+                            conn_a = Some((conn, active_bond_info));
+                        } else {
+                            info!("[ble] accepted connection into slot B");
+                            conn_b = Some((conn, active_bond_info));
+                        }
+                    }
+                    Err(BleHostError::BleHost(Error::Timeout)) => {
+                        warn!("Advertising timeout, sleep and wait for any key");
+                        set_ble_state(BleState::Inactive);
+
+                        request_sleep();
+
+                        // Wake on key or pointing activity after the advertising
+                        // timeout. Subscribed here, not up front: a permanently
+                        // idle subscriber stalls `publish_event_async` once the
+                        // channel fills, and its backlog would satisfy this wait
+                        // instantly with a stale event.
+                        let mut key_wake = crate::event::KeyboardEvent::subscriber();
+                        let mut pointing_wake = crate::event::PointingEvent::subscriber();
+                        let _ =
+                            select(key_wake.next_message_pure(), pointing_wake.next_message_pure()).await;
+
+                        report_activity();
+                    }
+                    Err(e) => {
+                        #[cfg(feature = "defmt")]
+                        let e = defmt::Debug2Format(&e);
+                        error!("Advertise error: {:?}", e);
+                        Timer::after_millis(200).await;
+                    }
+                },
+                Either4::Second(()) => {
+                    info!("[ble] connection A ended");
+                    conn_a = None;
+                }
+                Either4::Third(()) => {
+                    info!("[ble] connection B ended");
+                    conn_b = None;
+                }
+                Either4::Fourth(()) => {
+                    // Profile 切换：断开所有活跃连接并清空槽位
+                    for slot in [&mut conn_a, &mut conn_b] {
+                        if let Some((conn, _)) = slot {
+                            if conn.raw().is_connected() {
+                                conn.raw().disconnect();
+                                loop {
+                                    if let GattConnectionEvent::Disconnected { .. } = conn.next().await {
+                                        break;
+                                    }
+                                }
+                            }
+                            *slot = None;
                         }
                     }
                 }
-                Either::First(Err(BleHostError::BleHost(Error::Timeout))) => {
-                    warn!("Advertising timeout, sleep and wait for any key");
-                    set_ble_state(BleState::Inactive);
-
-                    request_sleep();
-
-                    // Wake on key or pointing activity after the advertising
-                    // timeout. Subscribed here, not up front: a permanently
-                    // idle subscriber stalls `publish_event_async` once the
-                    // channel fills, and its backlog would satisfy this wait
-                    // instantly with a stale event.
-                    let mut key_wake = crate::event::KeyboardEvent::subscriber();
-                    let mut pointing_wake = crate::event::PointingEvent::subscriber();
-                    let _ = select(key_wake.next_message_pure(), pointing_wake.next_message_pure()).await;
-
-                    report_activity();
-                }
-                Either::First(Err(e)) => {
-                    #[cfg(feature = "defmt")]
-                    let e = defmt::Debug2Format(&e);
-                    error!("Advertise error: {:?}", e);
-                    Timer::after_millis(200).await;
-                }
-                Either::Second(()) => {}
             };
 
             // Skip the Inactive transition if we never moved off Advertising
-            if crate::state::current_ble_status().state != BleState::Advertising {
+            //（仅当没有活跃连接时，避免把已连接状态误置为 Inactive）
+            if conn_a.is_none()
+                && conn_b.is_none()
+                && crate::state::current_ble_status().state != BleState::Advertising
+            {
                 set_ble_state(BleState::Inactive);
             }
         }
