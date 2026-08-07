@@ -1,7 +1,7 @@
 use bt_hci::cmd::le::{LeReadLocalSupportedFeatures, LeSetPhy};
 use bt_hci::controller::{ControllerCmdAsync, ControllerCmdSync};
 use embassy_futures::join::join3;
-use embassy_futures::select::{Either, Either3, Either4, select, select3, select4};
+use embassy_futures::select::{Either3, Either4, select, select3, select4};
 use embassy_time::{Duration, Timer, with_timeout};
 use rmk_types::ble::BleState;
 use rmk_types::connection::ConnectionType;
