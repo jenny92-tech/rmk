@@ -583,9 +583,12 @@ async fn gatt_events_task(server: &Server<'_>, conn: &GattConnection<'_, '_, Def
                         } else {
                             #[cfg(feature = "data_channel")]
                             let matched = if event.handle() == data_channel_rx_from_host.handle {
-                                if data.len() == 64 {
+                                // BLE 写入是可变长度（host 发 `&buf[..n]`，文本包可能只有 ~10 字节）；
+                                // 旧版要求精确 64 字节 → 所有 BLE 数据通道包被丢弃（屏幕黑 / 命令超时）。
+                                // 解析端按 PacketHeader.payload_len 取有效数据，尾部补零无害。
+                                if !data.is_empty() && data.len() <= 64 {
                                     let mut payload = [0u8; 64];
-                                    payload.copy_from_slice(data);
+                                    payload[..data.len()].copy_from_slice(data);
                                     // Drop on full — app is expected to keep up.
                                     let _ = crate::channel::DATA_CHANNEL_RX.try_send(payload);
                                 } else {
