@@ -44,7 +44,8 @@ pub(crate) mod profile;
 pub(crate) mod sleep;
 
 /// Max number of connections of a keyboard's BLE stack.
-const CONNECTIONS_MAX: usize = crate::SPLIT_PERIPHERALS_NUM + 1;
+/// +2: HID 连接 + 数据通道 host 连接（开发阶段，fork 定制）
+const CONNECTIONS_MAX: usize = crate::SPLIT_PERIPHERALS_NUM + 2;
 
 /// Max number of L2CAP channels
 const L2CAP_CHANNELS_MAX: usize = CONNECTIONS_MAX * 4; // Signal + att + smp + hid
@@ -458,14 +459,31 @@ async fn gatt_events_task(server: &Server<'_>, conn: &GattConnection<'_, '_, Def
                             debug!("Read GATT Event to Unknown: {:?}", event.handle());
                         }
 
-                        if conn.raw().security_level()?.encrypted() {
+                        // 数据通道特性：开发阶段允许未加密读取（host 不配对也能用）。
+                        // security_level 查询失败不 `?` 传播（否则 gatt 任务直接结束 → 连接被丢）。
+                        let encrypted = match conn.raw().security_level() {
+                            Ok(level) => level.encrypted(),
+                            Err(_) => false,
+                        };
+                        #[cfg(feature = "data_channel")]
+                        let is_data_channel_read =
+                            event.handle() == server.data_channel_service.tx_to_host.handle;
+                        #[cfg(not(feature = "data_channel"))]
+                        let is_data_channel_read = false;
+
+                        if encrypted || is_data_channel_read {
                             None
                         } else {
                             Some(AttErrorCode::INSUFFICIENT_ENCRYPTION)
                         }
                     }
                     GattEvent::Write(event) => {
-                        let encrypted = conn.raw().security_level()?.encrypted();
+                        // security_level 查询失败不 `?` 传播（否则 gatt 任务直接结束 →
+                        // run_ble_keyboard 收尾 → 连接被丢，之后所有写入收到 INVALID_HANDLE）。
+                        let encrypted = match conn.raw().security_level() {
+                            Ok(level) => level.encrypted(),
+                            Err(_) => false,
+                        };
 
                         // trouble-host 0.7 exposes written bytes via a closure; copy them out
                         // once so the dispatch below (which awaits) can use them freely.
@@ -562,7 +580,22 @@ async fn gatt_events_task(server: &Server<'_>, conn: &GattConnection<'_, '_, Def
                         if encrypted {
                             None
                         } else {
-                            Some(AttErrorCode::INSUFFICIENT_ENCRYPTION)
+                            // 数据通道写入与 CCCD 订阅：开发阶段允许未加密（host 不配对也能用）；
+                            // 其余特性（HID 等）仍要求加密。
+                            #[cfg(feature = "data_channel")]
+                            let is_data_channel_write =
+                                event.handle() == data_channel_rx_from_host.handle
+                                    || event.handle()
+                                        == data_channel_tx_to_host
+                                            .cccd_handle
+                                            .expect("No CCCD for data channel tx");
+                            #[cfg(not(feature = "data_channel"))]
+                            let is_data_channel_write = false;
+                            if is_data_channel_write {
+                                None
+                            } else {
+                                Some(AttErrorCode::INSUFFICIENT_ENCRYPTION)
+                            }
                         }
                     }
                     GattEvent::Other(_) => None,

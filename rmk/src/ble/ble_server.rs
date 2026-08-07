@@ -23,7 +23,7 @@ use rmk_types::protocol::rynk::{
 // struct is duplicated for every combination of optional services
 // (currently vial/rynk/no-host × data_channel).
 #[cfg(all(feature = "vial", feature = "data_channel"))]
-#[gatt_server]
+#[gatt_server(connections_max = 2)]
 pub(crate) struct Server {
     pub(crate) battery_service: BatteryService,
     pub(crate) hid_service: HidService,
@@ -33,7 +33,7 @@ pub(crate) struct Server {
 }
 
 #[cfg(all(feature = "vial", not(feature = "data_channel")))]
-#[gatt_server]
+#[gatt_server(connections_max = 2)]
 pub(crate) struct Server {
     pub(crate) battery_service: BatteryService,
     pub(crate) hid_service: HidService,
@@ -42,7 +42,7 @@ pub(crate) struct Server {
 }
 
 #[cfg(all(feature = "rynk", feature = "data_channel"))]
-#[gatt_server]
+#[gatt_server(connections_max = 2)]
 pub(crate) struct Server {
     pub(crate) battery_service: BatteryService,
     pub(crate) hid_service: HidService,
@@ -53,7 +53,7 @@ pub(crate) struct Server {
 }
 
 #[cfg(all(feature = "rynk", not(feature = "data_channel")))]
-#[gatt_server]
+#[gatt_server(connections_max = 2)]
 pub(crate) struct Server {
     pub(crate) battery_service: BatteryService,
     pub(crate) hid_service: HidService,
@@ -63,7 +63,7 @@ pub(crate) struct Server {
 }
 
 #[cfg(all(not(feature = "host"), feature = "data_channel"))]
-#[gatt_server]
+#[gatt_server(connections_max = 2)]
 pub(crate) struct Server {
     pub(crate) battery_service: BatteryService,
     pub(crate) hid_service: HidService,
@@ -72,7 +72,7 @@ pub(crate) struct Server {
 }
 
 #[cfg(all(not(feature = "host"), not(feature = "data_channel")))]
-#[gatt_server]
+#[gatt_server(connections_max = 2)]
 pub(crate) struct Server {
     pub(crate) battery_service: BatteryService,
     pub(crate) hid_service: HidService,
