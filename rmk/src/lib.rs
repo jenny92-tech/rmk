@@ -91,6 +91,8 @@ pub mod ble;
 pub mod boot;
 pub mod channel;
 pub mod config;
+#[cfg(feature = "controller")]
+pub mod controller;
 pub mod core_traits;
 #[cfg(feature = "dfu_split")]
 pub mod crc32;

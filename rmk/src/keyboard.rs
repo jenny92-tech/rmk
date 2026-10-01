@@ -143,12 +143,31 @@ impl Runnable for Keyboard<'_> {
         loop {
             // Wait for the next event, but wake up at the earliest pending deadline.
             // `with_deadline` polls the subscriber first, so a queued event is handled first.
-            let event = match self.next_deadline() {
-                Some(deadline) => with_deadline(deadline, self.keyboard_event_subscriber.next_message_pure())
-                    .await
-                    .ok(),
-                None => Some(self.keyboard_event_subscriber.next_message_pure().await),
+            let next_event = async {
+                match self.next_deadline() {
+                    Some(deadline) => with_deadline(deadline, self.keyboard_event_subscriber.next_message_pure())
+                        .await
+                        .ok(),
+                    None => Some(self.keyboard_event_subscriber.next_message_pure().await),
+                }
             };
+            // Runtime default-layer switches (`controller::set_default_layer`) need the keymap,
+            // which this task owns, so race them against the event wait.
+            #[cfg(feature = "controller")]
+            let event = match embassy_futures::select::select(
+                next_event,
+                crate::controller::PENDING_DEFAULT_LAYER.receive(),
+            )
+            .await
+            {
+                embassy_futures::select::Either::First(event) => event,
+                embassy_futures::select::Either::Second(layer) => {
+                    self.keymap.set_default_layer(layer);
+                    continue;
+                }
+            };
+            #[cfg(not(feature = "controller"))]
+            let event = next_event.await;
             match event {
                 Some(event) => self.process_inner(event).await,
                 None => self.fire_expired().await,
@@ -389,6 +408,13 @@ impl<'a> Keyboard<'a> {
 
         // Capture the event time once per event and thread it through.
         let event_time = Instant::now();
+
+        // Swallow keys the controller app owns (menu mode / deferred) before keymap dispatch.
+        // The app still sees them through its own `KeyboardEvent` subscriber.
+        #[cfg(feature = "controller")]
+        if crate::controller::should_swallow(&event) {
+            return;
+        }
 
         // Process key
         let key_action = &self.keymap.get_action_with_layer_cache(event);

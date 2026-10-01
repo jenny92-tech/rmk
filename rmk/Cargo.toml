@@ -146,6 +146,10 @@ dongle = [
 ## Enable custom message support.
 custom_message = ["rmk-types/custom_message"]
 
+## Enable controller runtime API: menu intercept, deferred keys, manual key send,
+## default-layer / BLE profile switch helpers. Public surface lives in `rmk::controller`.
+controller = []
+
 ## Enable the storage. The storage is optional to save memory
 storage = [
     "dep:embedded-storage",
