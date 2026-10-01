@@ -92,9 +92,11 @@ pub(crate) async fn reset() {
 
 /// The most one user slot holds. Changing it reframes stored values, but the new
 /// commit also changes [`SCHEMA_HASH`], so the next boot reinitializes on its own.
+/// (K9-Pad host builds: bump `K9_STORAGE_FORMAT` instead.)
 pub const USER_DATA_MAX_SIZE: usize = 16;
 
 /// Persist user-defined `bytes` in board-defined slot `slot`. RMK never looks inside one.
+/// On K9-Pad host builds slot `0xFF` is reserved for the layout hash.
 ///
 /// `Err` when `bytes` is longer than [`USER_DATA_MAX_SIZE`].
 pub async fn store_user_data(slot: u8, bytes: &[u8]) -> Result<(), heapless::CapacityError> {
@@ -341,11 +343,76 @@ const fn fnv_hash(mut hash: u32, bytes: &[u8]) -> u32 {
     hash
 }
 
+/// K9-Pad: version of the stored format on host builds, standing in for `RMK_COMMIT` in
+/// [`SCHEMA_HASH`]. Bump it whenever a rebase changes how stored items are framed — the
+/// `StorageKey` / `StorageValue` variants or their payload types; a failing
+/// `storage_variant_order_is_pinned` is the usual signal. A bump erases storage once,
+/// bonds included, which is the only safe way across a format change.
+///
+/// 2 = upstream storage refactor (StorageValue, DefaultLayer/LayoutOption keys, user slots).
+#[cfg(feature = "host")]
+pub(crate) const K9_STORAGE_FORMAT: u32 = 2;
+
+/// K9-Pad: user slot holding the compiled layout hash (little-endian `u32`). Boards must
+/// not use this slot with [`store_user_data`].
+#[cfg(feature = "host")]
+pub(crate) const LAYOUT_HASH_SLOT: u8 = 0xFF;
+
+/// K9-Pad layout gate: FNV-1a over the postcard-encoded compiled keymap and encoder map.
+///
+/// The same layout hashes identically on any machine and any rebuild. When the hash stored
+/// in [`LAYOUT_HASH_SLOT`] differs (the firmware's layout changed, or
+/// [`crate::request_keyboard_config_reset`] stored the sentinel), the layout items are
+/// rewritten from the firmware and BLE bonds are kept.
+#[cfg(feature = "host")]
+pub(crate) fn compute_layout_hash<const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_ENCODER: usize>(
+    data: &crate::keymap::KeymapData<ROW, COL, NUM_LAYER, NUM_ENCODER>,
+) -> u32 {
+    use postcard::experimental::max_size::MaxSize;
+    let mut hash = FNV_OFFSET;
+    let mut kbuf = [0u8; KeyAction::POSTCARD_MAX_SIZE];
+    for action in data.keymap.iter().flatten().flatten() {
+        if let Ok(used) = postcard::to_slice(action, &mut kbuf) {
+            hash = fnv_hash(hash, used);
+        }
+    }
+    let mut ebuf = [0u8; EncoderAction::POSTCARD_MAX_SIZE];
+    for action in data.encoder_map.iter().flatten() {
+        if let Ok(used) = postcard::to_slice(action, &mut ebuf) {
+            hash = fnv_hash(hash, used);
+        }
+    }
+    hash
+}
+
+/// Sentinel stored by [`crate::request_keyboard_config_reset`]: never equal to a real
+/// layout hash in practice, so the next boot rewrites the layout.
+#[cfg(feature = "host")]
+pub(crate) const INVALID_LAYOUT_HASH: u32 = 0;
+
+/// The [`LAYOUT_HASH_SLOT`] item for `hash`.
+#[cfg(feature = "host")]
+pub(crate) fn layout_hash_item(hash: u32) -> StorageItem {
+    StorageItem::UserData {
+        slot: LAYOUT_HASH_SLOT,
+        data: heapless::Vec::from_slice(&hash.to_le_bytes()).unwrap_or_default(),
+    }
+}
+
 /// FNV-1a over everything that frames stored bytes: rmk version, commit and features.
 /// A mismatch could decode an item as the wrong variant, so the storage is erased.
 pub(crate) const SCHEMA_HASH: u32 = {
     let mut hash = fnv_hash(FNV_OFFSET, env!("CARGO_PKG_VERSION").as_bytes());
-    hash = fnv_hash(hash, env!("RMK_COMMIT").as_bytes());
+    // K9-Pad: host builds key on K9_STORAGE_FORMAT instead of the commit, so an RMK update
+    // that leaves the stored format alone keeps keymap edits, macros and BLE bonds.
+    #[cfg(not(feature = "host"))]
+    {
+        hash = fnv_hash(hash, env!("RMK_COMMIT").as_bytes());
+    }
+    #[cfg(feature = "host")]
+    {
+        hash = fnv_hash(hash, &K9_STORAGE_FORMAT.to_le_bytes());
+    }
     // Features gate variants of the two enums, shifting their postcard tags.
     hash = fnv_hash(hash, env!("RMK_FEATURES").as_bytes());
     // `keyboard.toml` sizes decide how a stored value is framed.
@@ -373,6 +440,9 @@ pub struct Storage<
     pub(crate) buffer: [u8; get_buffer_size()],
     #[cfg(feature = "host")]
     pub(crate) clear_layout: bool,
+    /// Layout hash found in [`LAYOUT_HASH_SLOT`] at boot; `None` right after a full erase.
+    #[cfg(feature = "host")]
+    pub(crate) stored_layout_hash: Option<u32>,
 }
 
 impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usize, const NUM_ENCODER: usize>
@@ -386,7 +456,7 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
     }
 
     // Like `store`: split first so the future holds the pair, not the pair and `item`.
-    fn put(&mut self, item: StorageItem) -> impl Future<Output = Result<(), SSError<F::Error>>> {
+    pub(crate) fn put(&mut self, item: StorageItem) -> impl Future<Output = Result<(), SSError<F::Error>>> {
         let (key, value) = item.split();
         async move {
             self.flash
@@ -442,6 +512,8 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
             buffer: [0; get_buffer_size()],
             #[cfg(feature = "host")]
             clear_layout: false,
+            #[cfg(feature = "host")]
+            stored_layout_hash: None,
         };
 
         let stored = storage.fetch(StorageKey::StorageConfig).await;
@@ -461,6 +533,11 @@ impl<F: AsyncNorFlash, const ROW: usize, const COL: usize, const NUM_LAYER: usiz
             #[cfg(feature = "host")]
             {
                 storage.clear_layout = storage_config.clear_layout;
+                if let Ok(Some(StorageValue::UserData(data))) = storage.fetch(StorageKey::UserData(LAYOUT_HASH_SLOT)).await
+                    && let Ok(bytes) = <[u8; 4]>::try_from(data.as_slice())
+                {
+                    storage.stored_layout_hash = Some(u32::from_le_bytes(bytes));
+                }
             }
         }
 
@@ -868,6 +945,107 @@ mod tests {
             .await;
             let mut storage = new_storage(flash).await;
             assert!(matches!(storage.fetch(StorageKey::ConnectionType).await, Ok(None)));
+        });
+    }
+
+    /// K9-Pad: host builds hash the stored format version, not the RMK commit.
+    #[cfg(feature = "host")]
+    #[test]
+    fn host_schema_hash_ignores_the_rmk_commit() {
+        let mut hash = fnv_hash(FNV_OFFSET, env!("CARGO_PKG_VERSION").as_bytes());
+        hash = fnv_hash(hash, &K9_STORAGE_FORMAT.to_le_bytes());
+        hash = fnv_hash(hash, env!("RMK_FEATURES").as_bytes());
+        hash = fnv_hash(hash, &(MACRO_SPACE_SIZE as u32).to_le_bytes());
+        hash = fnv_hash(hash, &(crate::COMBO_SIZE as u32).to_le_bytes());
+        hash = fnv_hash(hash, &(crate::MORSE_SIZE as u32).to_le_bytes());
+        assert_eq!(hash, SCHEMA_HASH);
+    }
+
+    /// K9-Pad layout gate: a host edit survives a reflash of the same layout; a changed
+    /// compiled layout (or the reset sentinel) rewrites the layout but keeps the pairing.
+    #[cfg(feature = "host")]
+    #[test]
+    fn layout_gate_rewrites_layout_only_when_compiled_layout_changes() {
+        use rmk_types::action::Action;
+        use rmk_types::keycode::{HidKeyCode, KeyCode};
+
+        use crate::config::PositionalConfig;
+        use crate::keymap::{KeyMap, KeymapData};
+
+        let key = |k| KeyAction::Single(Action::Key(KeyCode::Hid(k)));
+        let (a, b, c) = (key(HidKeyCode::A), key(HidKeyCode::B), key(HidKeyCode::C));
+        let positional = PositionalConfig::<1, 1>::default();
+
+        // Boot `compiled` over `flash`, returning the live action at (0,0,0) and the flash.
+        async fn boot(
+            flash: TestFlash,
+            compiled: KeyAction,
+            positional: &PositionalConfig<1, 1>,
+        ) -> (KeyAction, Storage<TestFlash, 1, 1, 1, 0>) {
+            let mut storage = new_storage(flash).await;
+            let mut data = KeymapData::new([[[compiled]]]);
+            let mut behavior = RuntimeBehaviorConfig::default();
+            let action = KeyMap::new_from_storage(&mut data, Some(&mut storage), &mut behavior, positional)
+                .await
+                .action_at_pos(0, 0, 0);
+            (action, storage)
+        }
+
+        block_on(async {
+            // Fresh flash: compiled layout stands and its hash is recorded.
+            let (action, mut storage) = boot(async_flash_wrapper(Part::new()), a, &positional).await;
+            assert_eq!(action, a);
+            assert!(storage.stored_layout_hash.is_none(), "fresh flash has no layout hash yet");
+            assert!(matches!(
+                storage.fetch(StorageKey::UserData(LAYOUT_HASH_SLOT)).await,
+                Ok(Some(StorageValue::UserData(d))) if d.len() == 4
+            ));
+
+            // A host edit plus a pairing, then a reflash of the same layout: the edit wins.
+            storage
+                .put(StorageItem::Keymap {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                    action: b,
+                })
+                .await
+                .unwrap();
+            storage
+                .put(StorageItem::ConnectionType(ConnectionType::Ble))
+                .await
+                .unwrap();
+            let (flash, _) = storage.flash.destroy();
+            let (action, storage) = boot(flash, a, &positional).await;
+            assert_eq!(action, b);
+
+            // Firmware with another layout: the compiled layout wins, the pairing stays.
+            let (flash, _) = storage.flash.destroy();
+            let (action, mut storage) = boot(flash, c, &positional).await;
+            assert_eq!(action, c);
+            assert!(matches!(
+                storage.fetch(StorageKey::ConnectionType).await,
+                Ok(Some(StorageValue::ConnectionType(ConnectionType::Ble)))
+            ));
+
+            // `request_keyboard_config_reset` sentinel: same layout, but the edit is dropped.
+            storage
+                .put(StorageItem::Keymap {
+                    layer: 0,
+                    row: 0,
+                    col: 0,
+                    action: b,
+                })
+                .await
+                .unwrap();
+            storage.put(layout_hash_item(INVALID_LAYOUT_HASH)).await.unwrap();
+            let (flash, _) = storage.flash.destroy();
+            let (action, mut storage) = boot(flash, c, &positional).await;
+            assert_eq!(action, c);
+            assert!(matches!(
+                storage.fetch(StorageKey::ConnectionType).await,
+                Ok(Some(StorageValue::ConnectionType(ConnectionType::Ble)))
+            ));
         });
     }
 

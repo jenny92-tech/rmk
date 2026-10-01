@@ -138,6 +138,26 @@ pub mod watchdog;
 #[doc(hidden)]
 pub mod test_support;
 
+/// K9-Pad: "reset keymap, keep pairings". Stores a sentinel layout hash so the next boot
+/// rewrites keymap / encoders / behaviors / macros from the firmware while keeping BLE bonds.
+///
+/// Returns once the write has landed; the caller should reboot for it to take effect.
+#[cfg(all(feature = "storage", feature = "host"))]
+pub async fn request_keyboard_config_reset() {
+    if storage::store(storage::layout_hash_item(storage::INVALID_LAYOUT_HASH))
+        .await
+        .is_err()
+    {
+        error!("Failed to invalidate the stored layout hash");
+    }
+}
+
+/// K9-Pad: factory reset. Erases the whole RMK storage, BLE bonds included, then reboots.
+#[cfg(feature = "storage")]
+pub async fn reset_all_storage() {
+    storage::reset().await
+}
+
 pub async fn initialize_keymap<
     'a,
     const ROW: usize,

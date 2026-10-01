@@ -430,13 +430,22 @@ impl<'a> KeyMap<'a> {
 
         // Read from storage BEFORE flattening (storage expects typed arrays).
         if let Some(storage) = storage {
-            if storage.clear_layout {
-                debug!("`clear_layout` is set, rewriting the items the compiled-in layout owns.");
+            // K9-Pad layout gate: a stored hash that differs from the compiled layout rewrites
+            // the layout items (bonds kept). `None` means a fresh erase — nothing to overwrite.
+            let layout_hash = crate::storage::compute_layout_hash(data);
+            let layout_changed = storage.stored_layout_hash.is_some_and(|h| h != layout_hash);
+            if storage.clear_layout || layout_changed {
+                debug!("Layout changed or `clear_layout` set, rewriting the items the compiled-in layout owns.");
                 storage.write_layout(data, behavior).await;
             } else if storage.read_keymap(data, behavior).await.is_err() {
                 error!("Failed to read from storage, clearing...");
                 storage.flash.erase_all().await.ok();
                 reboot_keyboard();
+            }
+            if storage.stored_layout_hash != Some(layout_hash)
+                && let Err(e) = storage.put(crate::storage::layout_hash_item(layout_hash)).await
+            {
+                crate::storage::print_storage_error::<F>(e);
             }
         }
 
