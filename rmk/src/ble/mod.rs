@@ -3,7 +3,7 @@ use bt_hci::cmd::le::LeSubrateRequest;
 use bt_hci::cmd::le::{LeReadLocalSupportedFeatures, LeSetPhy};
 use bt_hci::controller::{ControllerCmdAsync, ControllerCmdSync};
 use bt_hci::param::Error as HciError;
-use embassy_futures::join::{join3, join4};
+use embassy_futures::join::{join3, join5};
 use embassy_futures::select::{Either, Either3, select, select3};
 #[cfg(feature = "split")]
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
@@ -77,6 +77,8 @@ const GATT_WRITE_BUFFER_SIZE: usize = {
             <crate::custom_message::CustomMessage as postcard::experimental::max_size::MaxSize>::POSTCARD_MAX_SIZE;
         if custom > size { custom } else { size }
     };
+    #[cfg(feature = "data_channel")]
+    let size = if size > 64 { size } else { 64 };
     size
 };
 
@@ -442,6 +444,25 @@ pub(crate) async fn ble_task<C: Controller, P: PacketPool, E: EventHandler>(mut 
     }
 }
 
+/// Whether the link is encrypted. A failed security-level query counts as unencrypted
+/// instead of ending `gatt_events_task`, which would drop the connection.
+fn link_encrypted(conn: &GattConnection<'_, '_, DefaultPacketPool>) -> bool {
+    conn.raw().security_level().is_ok_and(|level| level.encrypted())
+}
+
+/// `true` for the data channel's RX characteristic and its TX CCCD.
+#[cfg(feature = "data_channel")]
+fn is_data_channel_write(server: &Server<'_>, handle: u16) -> bool {
+    let service = &server.data_channel_service;
+    handle == service.rx_from_host.handle
+        || handle == service.tx_to_host.cccd_handle.expect("No CCCD for data channel tx")
+}
+
+#[cfg(not(feature = "data_channel"))]
+fn is_data_channel_write(_server: &Server<'_>, _handle: u16) -> bool {
+    false
+}
+
 /// Stream Events until the connection closes.
 ///
 /// This function will handle the GATT events and process them.
@@ -527,7 +548,7 @@ async fn gatt_events_task(server: &Server<'_>, conn: &GattConnection<'_, '_, Def
                             }
                         }
 
-                        if conn.raw().security_level()?.encrypted() {
+                        if link_encrypted(conn) {
                             None
                         } else {
                             Some(AttErrorCode::INSUFFICIENT_ENCRYPTION)
@@ -538,7 +559,7 @@ async fn gatt_events_task(server: &Server<'_>, conn: &GattConnection<'_, '_, Def
                         let is_custom_message = event.handle() == server.dongle_event_service.custom_to_keyboard.handle;
                         #[cfg(not(all(feature = "dongle", feature = "custom_message")))]
                         let is_custom_message = false;
-                        let encrypted = conn.raw().security_level()?.encrypted();
+                        let encrypted = link_encrypted(conn);
 
                         // trouble-host 0.7 exposes written bytes via a closure; copy them out
                         // once so the dispatch below (which awaits) can use them freely.
@@ -581,6 +602,25 @@ async fn gatt_events_task(server: &Server<'_>, conn: &GattConnection<'_, '_, Def
                             cccd_updated = true;
                         } else if event.handle() == hid_control_point.handle {
                             control_point_write = true;
+                        } else if is_data_channel_write(server, event.handle()) {
+                            #[cfg(feature = "data_channel")]
+                            if event.handle() == server.data_channel_service.rx_from_host.handle {
+                                // Writes are variable length (the host sends `&buf[..n]`); the
+                                // parser reads PacketHeader.payload_len, so zero padding is harmless.
+                                // Write-without-response can't be rejected, so drop unencrypted data here.
+                                if !encrypted {
+                                    warn!("Data channel write on an unencrypted link dropped");
+                                } else if !data.is_empty() && data_len <= 64 {
+                                    let mut payload = [0u8; 64];
+                                    payload[..data.len()].copy_from_slice(data);
+                                    // Drop on full — the app is expected to keep up.
+                                    let _ = crate::channel::DATA_CHANNEL_RX.try_send(payload);
+                                } else {
+                                    warn!("Wrong data channel packet length: {}", data_len);
+                                }
+                            } else {
+                                cccd_updated = true;
+                            }
                         } else if is_custom_message {
                             #[cfg(all(feature = "dongle", feature = "custom_message"))]
                             match postcard::from_bytes::<crate::custom_message::CustomMessage>(data) {
@@ -909,7 +949,13 @@ async fn serve_keyboard_connection<
     #[cfg(not(feature = "dongle"))]
     let dongle_event_task = core::future::pending::<()>();
 
-    let inner = join4(writer_task, led_task, host_task, dongle_event_task);
+    #[cfg(feature = "data_channel")]
+    let data_channel_task =
+        crate::data_channel::ble::run_ble_data_channel(server.data_channel_service.tx_to_host, conn);
+    #[cfg(not(feature = "data_channel"))]
+    let data_channel_task = core::future::pending::<()>();
+
+    let inner = join5(writer_task, led_task, host_task, dongle_event_task, data_channel_task);
     select(communication_task, inner).await;
 }
 

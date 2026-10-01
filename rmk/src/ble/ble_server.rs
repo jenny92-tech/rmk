@@ -43,6 +43,24 @@ pub(crate) struct Server {
     pub(crate) device_config_service: DeviceConfigurationService,
     #[cfg(feature = "dongle")]
     pub(crate) dongle_event_service: DongleEventService,
+    #[cfg(feature = "data_channel")]
+    pub(crate) data_channel_service: DataChannelService,
+}
+
+/// Vendor data-channel GATT service for the k9pad runtime protocol.
+///
+/// Companion app writes payloads (up to 64 bytes) to `rx_from_host`, fed into
+/// [`crate::channel::DATA_CHANNEL_RX`] by `gatt_events_task`, and subscribes to
+/// `tx_to_host` notifications driven by `data_channel::ble::run_ble_data_channel`.
+/// Like Rynk, both require an encrypted (bonded) link.
+#[cfg(feature = "data_channel")]
+#[gatt_service(uuid = "e9dc0001-7374-7265-616d-6b3970616400")]
+pub(crate) struct DataChannelService {
+    #[characteristic(uuid = "e9dc0002-7374-7265-616d-6b3970616400", write_without_response, permissions(encrypted), value = [0; 64])]
+    pub(crate) rx_from_host: [u8; 64],
+
+    #[characteristic(uuid = "e9dc0003-7374-7265-616d-6b3970616400", read, notify, permissions(encrypted), value = [0; 64])]
+    pub(crate) tx_to_host: [u8; 64],
 }
 
 /// One postcard-encoded [`crate::dongle::event::DongleEvent`] per notification.

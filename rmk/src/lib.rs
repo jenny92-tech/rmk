@@ -98,6 +98,8 @@ pub mod core_traits;
 pub mod crc32;
 #[cfg(feature = "custom_message")]
 pub mod custom_message;
+#[cfg(feature = "data_channel")]
+pub mod data_channel;
 pub mod debounce;
 #[cfg(feature = "_dfu")]
 pub mod dfu;

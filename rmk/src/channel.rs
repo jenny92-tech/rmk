@@ -100,3 +100,17 @@ pub(crate) static RYNK_BLE_RX_PIPE: embassy_sync::pipe::Pipe<RawMutex, 512> = em
 /// (`execute_macro` dispatches a macro's ops back through the action path).
 /// Producer: the `TriggerMacro` action. Consumer: the keyboard loop.
 pub(crate) static MACRO_TRIGGER_CHANNEL: Channel<RawMutex, u8, 4> = Channel::new();
+
+// Data channel (k9pad vendor RX/TX, 64-byte payloads). Both BLE and USB
+// transports produce/consume here; with both connected each TX packet goes to
+// whichever runner wakes first (fine for streaming pushes).
+
+/// Host → device payload queue, filled by the BLE GATT write handler and the
+/// USB HID OUT report reader.
+#[cfg(feature = "data_channel")]
+pub static DATA_CHANNEL_RX: Channel<RawMutex, [u8; 64], 4> = Channel::new();
+
+/// Device → host payload queue, drained by the BLE notify runner and the USB
+/// HID IN report writer.
+#[cfg(feature = "data_channel")]
+pub static DATA_CHANNEL_TX: Channel<RawMutex, [u8; 64], 4> = Channel::new();
